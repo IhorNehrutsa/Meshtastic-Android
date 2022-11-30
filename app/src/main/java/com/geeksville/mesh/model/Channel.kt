@@ -53,6 +53,14 @@ data class Channel(
                 ModemPreset.LONG_FAST -> "LongFast"
                 ModemPreset.LONG_SLOW -> "LongSlow"
                 ModemPreset.VERY_LONG_SLOW -> "VLongSlow"
+                ModemPreset.AIR_RATE_300 -> "0.3Kbps"
+                ModemPreset.AIR_RATE_1200 -> "1.2Kbps"
+                ModemPreset.AIR_RATE_2400 -> "2.4Kbps"
+                ModemPreset.AIR_RATE_4800 -> "4.8Kbps"
+                ModemPreset.AIR_RATE_9600 -> "9.6Kbps"
+                ModemPreset.AIR_RATE_19200 -> "19.2Kbps"
+                ModemPreset.AIR_RATE_38400 -> "38.4Kbps"
+                ModemPreset.AIR_RATE_62500 -> "62.5Kbps"
                 else -> "Invalid"
             }
         }

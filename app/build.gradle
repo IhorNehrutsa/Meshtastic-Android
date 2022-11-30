@@ -93,6 +93,10 @@ android {
         abortOnError false
     }
     namespace 'com.geeksville.mesh'
+    dependenciesInfo {
+        includeInApk true
+        includeInBundle true
+    }
 }
 
 play {

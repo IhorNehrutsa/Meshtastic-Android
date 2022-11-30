@@ -65,7 +65,7 @@ class MockInterface(private val service: RadioInterfaceService) : Logging, IRadi
 
                         lora =
                             ConfigProtos.Config.LoRaConfig.newBuilder().apply {
-                                region = ConfigProtos.Config.LoRaConfig.RegionCode.TW
+                                region = ConfigProtos.Config.LoRaConfig.RegionCode.UNSET
                                 // FIXME set critical times?
                             }.build()
                     }.build()

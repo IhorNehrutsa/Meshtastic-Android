@@ -59,9 +59,21 @@
     <string name="must_update">You must update this application on the app store (or Github). It is too old to talk to this radio firmware.  Please read our <a href="https://meshtastic.org/docs/software/android/android-installation">docs</a> on this topic.</string>
     <string name="none">None (disable)</string>
     <string name="modem_config_short">Short Range / Fast</string>
+    <string name="modem_config_slow_short">Short Range / Slow</string>
     <string name="modem_config_medium">Medium Range / Fast</string>
+    <string name="modem_config_slow_medium">Medium Range / Slow</string>
     <string name="modem_config_long">Long Range / Fast</string>
+    <string name="modem_config_slow_long">Long Range / Slow</string>
     <string name="modem_config_very_long">Very Long Range / Slow</string>
+    <string name="modem_config_300">0.3Kbps</string>
+    <string name="modem_config_1200">1.2Kbps</string>
+    <string name="modem_config_2400">2.4Kbps</string>
+    <string name="modem_config_4800">4.8Kbps</string>
+    <string name="modem_config_9600">9.6Kbps</string>
+    <string name="modem_config_19200">19.2Kbps</string>
+    <string name="modem_config_38400">38.4Kbps</string>
+    <string name="modem_config_62500">62.5Kbps</string>
+
     <string name="modem_config_unrecognized">UNRECOGNIZED</string>
     <string name="meshtastic_service_notifications">Meshtastic Service Notifications</string>
     <string name="location_disabled_warning">Location must be turned on (high accuracy) to find new devices via bluetooth. You can turn it off again afterwards.</string>
@@ -110,15 +122,12 @@
     <string name="provide_location_to_mesh">Provide location to mesh</string>
     <string name="camera_required">Camera permission</string>
     <string name="why_camera_required">We must be granted access to the camera to read QR codes. No pictures or videos will be saved.</string>
-    <string name="modem_config_slow_short">Short Range / Slow</string>
-    <string name="modem_config_slow_medium">Medium Range / Slow</string>
     <plurals name="delete_messages">
         <item quantity="one">Delete message?</item>
         <item quantity="other">Delete %s messages?</item>
     </plurals>
     <string name="delete">Delete</string>
     <string name="select_all">Select all</string>
-    <string name="modem_config_slow_long">Long Range / Slow</string>
     <string name="style_selection">Style Selection</string>
     <string name="download_region">Download Region</string>
     <string name="name">Name</string>
