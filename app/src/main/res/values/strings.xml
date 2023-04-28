@@ -71,6 +71,7 @@
     <string name="modem_config_4800">4.8Kbps</string>
     <string name="modem_config_9600">9.6Kbps</string>
     <string name="modem_config_19200">19.2Kbps</string>
+    <string name="modem_config_37500">37.5Kbps</string>
     <string name="modem_config_38400">38.4Kbps</string>
     <string name="modem_config_62500">62.5Kbps</string>
 

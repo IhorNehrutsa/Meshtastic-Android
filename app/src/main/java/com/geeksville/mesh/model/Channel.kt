@@ -59,6 +59,7 @@ data class Channel(
                 ModemPreset.AIR_RATE_4800 -> "4.8Kbps"
                 ModemPreset.AIR_RATE_9600 -> "9.6Kbps"
                 ModemPreset.AIR_RATE_19200 -> "19.2Kbps"
+                ModemPreset.AIR_RATE_37500 -> "37.5Kbps"
                 ModemPreset.AIR_RATE_38400 -> "38.4Kbps"
                 ModemPreset.AIR_RATE_62500 -> "62.5Kbps"
                 else -> "Invalid"
