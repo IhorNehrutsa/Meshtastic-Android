@@ -1,5 +1,6 @@
 package com.geeksville.mesh.ui
 
+import android.content.res.ColorStateList
 import android.os.Bundle
 import android.text.method.LinkMovementMethod
 import android.view.LayoutInflater
@@ -12,6 +13,7 @@ import androidx.core.os.bundleOf
 import androidx.core.text.HtmlCompat
 import androidx.fragment.app.activityViewModels
 import androidx.fragment.app.setFragmentResult
+import androidx.lifecycle.asLiveData
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.geeksville.mesh.NodeInfo
@@ -54,6 +56,7 @@ class UsersFragment : ScreenFragment("Users"), Logging {
         private var nodes = arrayOf<NodeInfo>()
 
         private fun popup(view: View, position: Int) {
+            if (!model.isConnected()) return
             val node = nodes[position]
             val user = node.user
             val showAdmin = position == 0 || model.adminChannelIndex > 0
@@ -84,6 +87,19 @@ class UsersFragment : ScreenFragment("Users"), Logging {
                             debug("requesting position for ${user.longName}")
                             model.requestPosition(node.num)
                         }
+                    }
+                    R.id.traceroute -> {
+                        if (position > 0 && user != null) {
+                            debug("requesting traceroute for ${user.longName}")
+                            model.requestTraceroute(node.num)
+                        }
+                    }
+                    R.id.remote_admin -> {
+                        debug("calling remote admin --> destNum: ${node.num}")
+                        parentFragmentManager.beginTransaction()
+                            .replace(R.id.mainActivityLayout, DeviceSettingsFragment(node))
+                            .addToBackStack(null)
+                            .commit()
                     }
                     R.id.reboot -> {
                         MaterialAlertDialogBuilder(requireContext())
@@ -205,8 +221,13 @@ class UsersFragment : ScreenFragment("Users"), Logging {
         override fun onBindViewHolder(holder: ViewHolder, position: Int) {
             val n = nodes[position]
             val user = n.user
-            holder.chipNode.text = user?.shortName ?: "UNK"
-            val name = user?.longName ?: "Unknown node"
+            val (textColor, nodeColor) = n.colors
+            with(holder.chipNode) {
+                text = user?.shortName ?: "UNK"
+                chipBackgroundColor = ColorStateList.valueOf(nodeColor)
+                setTextColor(textColor)
+            }
+            val name = user?.longName ?: getString(R.string.unknown_username)
             holder.nodeNameView.text = name
 
             val pos = n.validPosition
@@ -221,7 +242,7 @@ class UsersFragment : ScreenFragment("Users"), Logging {
                 holder.coordsView.visibility = View.INVISIBLE
             }
 
-            val ourNodeInfo = model.nodeDB.nodes.value?.get(model.nodeDB.myId.value)
+            val ourNodeInfo = model.ourNodeInfo.value
             val distance = ourNodeInfo?.distanceStr(n)
             if (distance != null) {
                 holder.distanceView.text = distance
@@ -286,11 +307,11 @@ class UsersFragment : ScreenFragment("Users"), Logging {
     ) {
 
         val (image, text) = when (battery) {
-            in 1..100 -> Pair(
+            in 0..100 -> Pair(
                 R.drawable.ic_battery_full_24,
                 String.format("%d%% %.2fV", battery, voltage ?: 0)
             )
-            0 -> Pair(R.drawable.ic_power_plug_24, "")
+            101 -> Pair(R.drawable.ic_power_plug_24, "")
             else -> Pair(R.drawable.ic_battery_full_24, "?")
         }
 
@@ -317,5 +338,29 @@ class UsersFragment : ScreenFragment("Users"), Logging {
         model.nodeDB.nodes.observe(viewLifecycleOwner) {
             nodesAdapter.onNodesChanged(it.values.toTypedArray())
         }
+
+        model.packetResponse.asLiveData().observe(viewLifecycleOwner) { meshLog ->
+            meshLog?.meshPacket?.let { meshPacket ->
+                val routeList = meshLog.routeDiscovery?.routeList ?: return@let
+                fun nodeName(num: Int) = model.nodeDB.nodesByNum?.get(num)?.user?.longName
+
+                var routeStr = "${nodeName(meshPacket.to)} --> "
+                routeList.forEach { num -> routeStr += "${nodeName(num)} --> " }
+                routeStr += "${nodeName(meshPacket.from)}"
+
+                MaterialAlertDialogBuilder(requireContext())
+                    .setTitle(R.string.traceroute)
+                    .setMessage(routeStr)
+                    .setPositiveButton(R.string.okay) { _, _ -> }
+                    .show()
+
+                model.clearPacketResponse()
+            }
+        }
+    }
+
+    override fun onDestroyView() {
+        super.onDestroyView()
+        _binding = null
     }
 }

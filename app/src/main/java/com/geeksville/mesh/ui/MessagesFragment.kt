@@ -26,23 +26,12 @@ import com.geeksville.mesh.database.entity.QuickChatAction
 import com.geeksville.mesh.databinding.AdapterMessageLayoutBinding
 import com.geeksville.mesh.databinding.MessagesFragmentBinding
 import com.geeksville.mesh.model.UIViewModel
-import com.geeksville.mesh.service.MeshService
+import com.geeksville.mesh.util.onEditorAction
 import com.google.android.material.chip.Chip
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import dagger.hilt.android.AndroidEntryPoint
 import java.text.DateFormat
 import java.util.*
-
-// Allows usage like email.on(EditorInfo.IME_ACTION_NEXT, { confirm() })
-fun EditText.on(actionId: Int, func: () -> Unit) {
-    setOnEditorActionListener { _, receivedActionId, _ ->
-
-        if (actionId == receivedActionId) {
-            func()
-        }
-        true
-    }
-}
 
 @AndroidEntryPoint
 class MessagesFragment : Fragment(), Logging {
@@ -59,17 +48,6 @@ class MessagesFragment : Fragment(), Logging {
     private val model: UIViewModel by activityViewModels()
 
     private var isConnected = false
-
-    // Allows textMultiline with IME_ACTION_SEND
-    private fun EditText.onActionSend(func: () -> Unit) {
-        setOnEditorActionListener { _, actionId, _ ->
-
-            if (actionId == EditorInfo.IME_ACTION_SEND) {
-                func()
-            }
-            true
-        }
-    }
 
     // Provide a direct reference to each of the views within a data item
     // Used to cache the views within the item layout for fast access
@@ -167,6 +145,7 @@ class MessagesFragment : Fragment(), Logging {
             holder.messageTime.text = getShortDateTime(Date(msg.time))
 
             val icon = when (msg.status) {
+                MessageStatus.RECEIVED -> R.drawable.ic_twotone_how_to_reg_24
                 MessageStatus.QUEUED -> R.drawable.ic_twotone_cloud_upload_24
                 MessageStatus.DELIVERED -> R.drawable.cloud_on
                 MessageStatus.ENROUTE -> R.drawable.ic_twotone_cloud_24
@@ -174,11 +153,17 @@ class MessagesFragment : Fragment(), Logging {
                 else -> null
             }
 
-            if (icon != null) {
+            if (icon != null && isLocal) {
                 holder.messageStatusIcon.setImageResource(icon)
                 holder.messageStatusIcon.visibility = View.VISIBLE
             } else
                 holder.messageStatusIcon.visibility = View.GONE
+
+            holder.messageStatusIcon.setOnClickListener {
+                if (isAdded) {
+                    Toast.makeText(context, "${msg.status}", Toast.LENGTH_SHORT).show()
+                }
+            }
 
             holder.itemView.setOnLongClickListener {
                 clickItem(holder)
@@ -259,31 +244,22 @@ class MessagesFragment : Fragment(), Logging {
             binding.messageTitle.text = contactName
         }
 
-        // contactKey: unique contact key filter (channel)+(nodeId)
-        fun sendMessage(str: String, contactKey: String) {
-            model.sendMessage(
-                str,
-                contactKey[0].digitToInt(), // Channel
-                contactKey.substring(1) // NodeID
-            )
-        }
-
         binding.sendButton.setOnClickListener {
             debug("User clicked sendButton")
 
             val str = binding.messageInputText.text.toString().trim()
             if (str.isNotEmpty())
-                sendMessage(str, contactKey)
+                model.sendMessage(str, contactKey)
             binding.messageInputText.setText("") // blow away the string the user just entered
 
             // requireActivity().hideKeyboard()
         }
 
-        binding.messageInputText.onActionSend {
-            debug("did IME action")
+        binding.messageInputText.onEditorAction(EditorInfo.IME_ACTION_SEND) {
+            debug("received IME_ACTION_SEND")
 
             val str = binding.messageInputText.text.toString().trim()
-            if (str.isNotEmpty()) sendMessage(str, contactKey)
+            if (str.isNotEmpty()) model.sendMessage(str, contactKey)
             binding.messageInputText.setText("") // blow away the string the user just entered
 
             // requireActivity().hideKeyboard()
@@ -300,9 +276,9 @@ class MessagesFragment : Fragment(), Logging {
         }
 
         // If connection state _OR_ myID changes we have to fix our ability to edit outgoing messages
-        model.connectionState.observe(viewLifecycleOwner) { connectionState ->
+        model.connectionState.observe(viewLifecycleOwner) {
             // If we don't know our node ID and we are offline don't let user try to send
-            isConnected = connectionState == MeshService.ConnectionState.CONNECTED
+            isConnected = model.isConnected()
             binding.textInputLayout.isEnabled = isConnected
             binding.sendButton.isEnabled = isConnected
             for (subView: View in binding.quickChatLayout.allViews) {
@@ -335,13 +311,20 @@ class MessagesFragment : Fragment(), Logging {
                             binding.messageInputText.setText(newText)
                             binding.messageInputText.setSelection(newText.length)
                         } else {
-                            sendMessage(action.message, contactKey)
+                            model.sendMessage(action.message, contactKey)
                         }
                     }
                     binding.quickChatLayout.addView(button)
                 }
             }
         }
+    }
+
+    override fun onDestroyView() {
+        super.onDestroyView()
+        actionMode?.finish()
+        actionMode = null
+        _binding = null
     }
 
     private inner class ActionModeCallback : ActionMode.Callback {

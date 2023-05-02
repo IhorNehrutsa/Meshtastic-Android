@@ -1,5 +1,6 @@
 package com.geeksville.mesh.ui.components
 
+import androidx.annotation.StringRes
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.*
 import androidx.compose.runtime.Composable
@@ -18,39 +19,63 @@ fun PreferenceFooter(
     onSaveClicked: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    PreferenceFooter(
+        enabled = enabled,
+        negativeText = R.string.cancel,
+        onNegativeClicked = onCancelClicked,
+        positiveText = R.string.send,
+        onPositiveClicked = onSaveClicked,
+        modifier = modifier,
+    )
+}
+
+@Composable
+fun PreferenceFooter(
+    enabled: Boolean,
+    @StringRes negativeText: Int,
+    onNegativeClicked: () -> Unit,
+    @StringRes positiveText: Int,
+    onPositiveClicked: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
     Row(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
-            .size(48.dp),
+            .height(64.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.End
     ) {
         Button(
             modifier = modifier
                 .fillMaxWidth()
+                .height(48.dp)
                 .weight(1f),
             enabled = enabled,
-            onClick = onCancelClicked,
-            colors = ButtonDefaults.buttonColors(backgroundColor = Color.Red)
+            onClick = onNegativeClicked,
+            colors = ButtonDefaults.buttonColors(
+                backgroundColor = Color.Red.copy(alpha = 0.6f),
+                disabledContentColor = MaterialTheme.colors.onSurface.copy(alpha = ContentAlpha.disabled)
+            )
         ) {
             Text(
-                text = stringResource(id = R.string.cancel),
+                text = stringResource(id = negativeText),
                 style = MaterialTheme.typography.body1,
-                color = if (!enabled) MaterialTheme.colors.onSurface.copy(alpha = ContentAlpha.disabled) else Color.Unspecified,
             )
         }
         Button(
             modifier = modifier
                 .fillMaxWidth()
+                .height(48.dp)
                 .weight(1f),
             enabled = enabled,
-            onClick = onSaveClicked,
-            colors = ButtonDefaults.buttonColors(backgroundColor = Color.Green)
+            onClick = onPositiveClicked,
+            colors = ButtonDefaults.buttonColors(
+                backgroundColor = Color.Green.copy(alpha = 0.6f),
+                disabledContentColor = MaterialTheme.colors.onSurface.copy(alpha = ContentAlpha.disabled)
+            )
         ) {
             Text(
-                text = stringResource(id = R.string.save_btn),
+                text = stringResource(id = positiveText),
                 style = MaterialTheme.typography.body1,
-                color = if (!enabled) MaterialTheme.colors.onSurface.copy(alpha = ContentAlpha.disabled) else Color.DarkGray,
             )
         }
     }

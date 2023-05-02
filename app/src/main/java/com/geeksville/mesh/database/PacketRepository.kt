@@ -18,6 +18,10 @@ class PacketRepository @Inject constructor(private val packetDaoLazy: dagger.Laz
         packetDao.getAllPackets()
     }
 
+    suspend fun getQueuedPackets(): List<DataPacket>? = withContext(Dispatchers.IO) {
+        packetDao.getQueuedPackets()
+    }
+
     suspend fun insert(packet: Packet) = withContext(Dispatchers.IO) {
         packetDao.insert(packet)
     }
@@ -30,6 +34,10 @@ class PacketRepository @Inject constructor(private val packetDaoLazy: dagger.Laz
         packetDao.updateMessageStatus(d, m)
     }
 
+    suspend fun getDataPacketById(requestId: Int) = withContext(Dispatchers.IO) {
+        packetDao.getDataPacketById(requestId)
+    }
+
     suspend fun deleteAllMessages() = withContext(Dispatchers.IO) {
         packetDao.deleteAllMessages()
     }
@@ -37,6 +45,11 @@ class PacketRepository @Inject constructor(private val packetDaoLazy: dagger.Laz
     suspend fun deleteMessages(uuidList: List<Long>) = withContext(Dispatchers.IO) {
         packetDao.deleteMessages(uuidList)
     }
+
+    suspend fun deleteWaypoint(id: Int) = withContext(Dispatchers.IO) {
+        packetDao.deleteWaypoint(id)
+    }
+
     suspend fun delete(packet: Packet) = withContext(Dispatchers.IO) {
         packetDao.delete(packet)
     }

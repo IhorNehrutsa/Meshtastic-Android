@@ -2,13 +2,10 @@
 
 buildscript {
     ext {
-        kotlin_version = '1.6.21'
-        coroutines_version = '1.6.0'
-        lifecycle_version = "2.5.1"
-        room_version = '2.4.3'
-        hilt_version = '2.40.5'
-        datastore_version = '1.0.0'
-        compose_version = '1.2.0-rc02'
+        useCrashlytics = false
+        kotlin_version = '1.8.10'
+        hilt_version = '2.45'
+        protobuf_version = '3.22.3'
     }
 
     repositories {
@@ -16,7 +13,7 @@ buildscript {
         mavenCentral()
     }
     dependencies {
-        classpath 'com.android.tools.build:gradle:7.3.1'
+        classpath 'com.android.tools.build:gradle:7.4.2'
         classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlin_version"
         classpath "org.jetbrains.kotlin:kotlin-serialization:$kotlin_version"
 
@@ -24,14 +21,14 @@ buildscript {
         // in the individual module build.gradle files
 
         // Firebase Crashlytics
-        classpath 'com.google.gms:google-services:4.3.13'
-        classpath 'com.google.firebase:firebase-crashlytics-gradle:2.9.1'
+        if (project.findProperty("useCrashlytics") == true) {
+            println("useCrashlytics classpath $useCrashlytics")
+            classpath 'com.google.gms:google-services:4.3.15'
+            classpath 'com.google.firebase:firebase-crashlytics-gradle:2.9.2'
+        }
 
         // protobuf plugin - docs here https://github.com/google/protobuf-gradle-plugin
-        classpath 'com.google.protobuf:protobuf-gradle-plugin:0.8.18'
-
-        //classpath "app.brant:amazonappstorepublisher:0.1.0"
-        classpath 'com.github.triplet.gradle:play-publisher:3.7.0'
+        classpath 'com.google.protobuf:protobuf-gradle-plugin:0.8.19'
 
         // for unit testing https://github.com/bjoernQ/unmock-plugin
         classpath 'com.github.bjoernq:unmockplugin:0.7.9'

@@ -52,6 +52,7 @@ data class Channel(
                 ModemPreset.MEDIUM_SLOW -> "MediumSlow"
                 ModemPreset.LONG_FAST -> "LongFast"
                 ModemPreset.LONG_SLOW -> "LongSlow"
+                ModemPreset.LONG_MODERATE -> "LongMod"
                 ModemPreset.VERY_LONG_SLOW -> "VLongSlow"
                 ModemPreset.AIR_RATE_300 -> "0.3Kbps"
                 ModemPreset.AIR_RATE_1200 -> "1.2Kbps"

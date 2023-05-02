@@ -20,6 +20,7 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.app.AppCompatDelegate
 import androidx.appcompat.widget.Toolbar
 import androidx.core.content.ContextCompat
@@ -42,17 +43,16 @@ import com.geeksville.mesh.repository.radio.SerialInterface
 import com.geeksville.mesh.service.*
 import com.geeksville.mesh.ui.*
 import com.geeksville.mesh.util.Exceptions
+import com.geeksville.mesh.util.LanguageUtils
 import com.geeksville.mesh.util.exceptionReporter
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.snackbar.Snackbar
 import com.google.android.material.tabs.TabLayoutMediator
-import com.suddenh4x.ratingdialog.AppRating
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
-import java.nio.charset.Charset
 import java.text.DateFormat
 import java.util.Date
 import javax.inject.Inject
@@ -106,10 +106,8 @@ eventually:
   make a custom theme: https://github.com/material-components/material-components-android/tree/master/material-theme-builder
 */
 
-val utf8: Charset = Charset.forName("UTF-8")
-
 @AndroidEntryPoint
-class MainActivity : BaseActivity(), Logging {
+class MainActivity : AppCompatActivity(), Logging {
 
     private lateinit var binding: ActivityMainBinding
 
@@ -135,7 +133,6 @@ class MainActivity : BaseActivity(), Logging {
 
     data class TabInfo(val text: String, val icon: Int, val content: Fragment)
 
-    // private val tabIndexes = generateSequence(0) { it + 1 } FIXME, instead do withIndex or zip? to get the ids below, also stop duplicating strings
     private val tabInfos = arrayOf(
         TabInfo(
             "Messages",
@@ -164,30 +161,12 @@ class MainActivity : BaseActivity(), Logging {
         )
     )
 
-    private val tabsAdapter = object : FragmentStateAdapter(this) {
+    private val tabsAdapter = object : FragmentStateAdapter(supportFragmentManager, lifecycle) {
 
         override fun getItemCount(): Int = tabInfos.size
 
         override fun createFragment(position: Int): Fragment {
-            // Return a NEW fragment instance in createFragment(int)
-            /*
-            fragment.arguments = Bundle().apply {
-                // Our object is just an integer :-P
-                putInt(ARG_OBJECT, position + 1)
-            } */
             return tabInfos[position].content
-        }
-    }
-
-    /// Ask user to rate in play store
-    private fun askToRate() {
-        exceptionReporter { // we don't want to crash our app because of bugs in this optional feature
-            AppRating.Builder(this)
-                .setMinimumLaunchTimes(10) // default is 5, 3 means app is launched 3 or more times
-                .setMinimumDays(10) // default is 5, 0 means install day, 10 means app is launched 10 or more days later than installation
-                .setMinimumLaunchTimesToShowAgain(5) // default is 5, 1 means app is launched 1 or more times after neutral button clicked
-                .setMinimumDaysToShowAgain(14) // default is 14, 1 means app is launched 1 or more days after neutral button clicked
-                .showIfMeetsConditions()
         }
     }
 
@@ -199,15 +178,25 @@ class MainActivity : BaseActivity(), Logging {
         installSplashScreen()
         super.onCreate(savedInstanceState)
 
-        val prefs = UIViewModel.getPreferences(this)
-        if (!prefs.getBoolean("app_intro_completed", false)) {
-            startActivity(Intent(this, AppIntroduction::class.java))
+        if (savedInstanceState == null) {
+            val prefs = UIViewModel.getPreferences(this)
+            // First run: show AppIntroduction
+            if (!prefs.getBoolean("app_intro_completed", false)) {
+                startActivity(Intent(this, AppIntroduction::class.java))
+            }
+            // First run: migrate in-app language prefs to appcompat
+            val lang = prefs.getString("lang", LanguageUtils.SYSTEM_DEFAULT)
+            if (lang != LanguageUtils.SYSTEM_MANAGED) LanguageUtils.migrateLanguagePrefs(prefs)
+            info("in-app language is ${LanguageUtils.getLocale()}")
+            // Set theme
+            AppCompatDelegate.setDefaultNightMode(
+                prefs.getInt("theme", AppCompatDelegate.MODE_NIGHT_FOLLOW_SYSTEM)
+            )
+            // Ask user to rate in play store
+            (application as GeeksvilleApplication).askToRate(this)
         }
 
         binding = ActivityMainBinding.inflate(layoutInflater)
-
-        /// Set theme
-        setUITheme(prefs)
         setContentView(binding.root)
 
         initToolbar()
@@ -221,14 +210,8 @@ class MainActivity : BaseActivity(), Logging {
             tab.icon = ContextCompat.getDrawable(this, tabInfos[position].icon)
         }.attach()
 
-        model.connectionState.observe(this) { connected ->
-            updateConnectionStatusImage(connected)
-        }
-
         // Handle any intent
         handleIntent(intent)
-
-        if (isGooglePlayAvailable(this)) askToRate()
     }
 
     private fun initToolbar() {
@@ -651,11 +634,34 @@ class MainActivity : BaseActivity(), Logging {
         unregisterMeshReceiver() // No point in receiving updates while the GUI is gone, we'll get them when the user launches the activity
         unbindMeshService()
 
+        scanModel.changeDeviceAddress.removeObservers(this)
+        model.connectionState.removeObservers(this)
+        bluetoothViewModel.enabled.removeObservers(this)
+        model.requestChannelUrl.removeObservers(this)
+
         super.onStop()
     }
 
     override fun onStart() {
         super.onStart()
+
+        scanModel.changeDeviceAddress.observe(this) { newAddr ->
+            newAddr?.let {
+                try {
+                    model.meshService?.let { service ->
+                        MeshService.changeDeviceAddress(this, service, newAddr)
+                    }
+                    scanModel.changeSelectedAddress(newAddr) // if it throws the change will be discarded
+                } catch (ex: RemoteException) {
+                    errormsg("changeDeviceSelection failed, probably it is shutting down $ex.message")
+                    // ignore the failure and the GUI won't be updating anyways
+                }
+            }
+        }
+
+        model.connectionState.observe(this) { connected ->
+            updateConnectionStatusImage(connected)
+        }
 
         bluetoothViewModel.enabled.observe(this) { enabled ->
             if (!enabled && !requestedEnable && scanModel.selectedBluetooth) {
@@ -672,7 +678,8 @@ class MainActivity : BaseActivity(), Logging {
                         }
                         .setPositiveButton(R.string.accept) { _, _ ->
                             info("requesting permissions")
-                            requestPermissionsLauncher.launch(getBluetoothPermissions())                    }
+                            requestPermissionsLauncher.launch(getBluetoothPermissions())
+                        }
                         .show()
                 }
             }
@@ -761,16 +768,10 @@ class MainActivity : BaseActivity(), Logging {
                     handler.removeCallbacksAndMessages(null)
                 return true
             }
-            R.id.device_settings -> {
+            R.id.radio_config -> {
+                val node = model.ourNodeInfo.value ?: return true
                 supportFragmentManager.beginTransaction()
-                    .add(R.id.mainActivityLayout, DeviceSettingsFragment())
-                    .addToBackStack(null)
-                    .commit()
-                return true
-            }
-            R.id.module_settings -> {
-                supportFragmentManager.beginTransaction()
-                    .add(R.id.mainActivityLayout, ModuleSettingsFragment())
+                    .add(R.id.mainActivityLayout, DeviceSettingsFragment(node))
                     .addToBackStack(null)
                     .commit()
                 return true
@@ -825,97 +826,52 @@ class MainActivity : BaseActivity(), Logging {
 
         /// Prepare dialog and its items
         val builder = MaterialAlertDialogBuilder(this)
-        builder.setTitle(getString(R.string.choose_theme_title))
+        builder.setTitle(getString(R.string.choose_theme))
 
-        val styles = arrayOf(
-            getString(R.string.theme_light),
-            getString(R.string.theme_dark),
-            getString(R.string.theme_system)
+        val styles = mapOf(
+            getString(R.string.theme_light) to AppCompatDelegate.MODE_NIGHT_NO,
+            getString(R.string.theme_dark) to AppCompatDelegate.MODE_NIGHT_YES,
+            getString(R.string.theme_system) to AppCompatDelegate.MODE_NIGHT_FOLLOW_SYSTEM
         )
 
         /// Load preferences and its value
         val prefs = UIViewModel.getPreferences(this)
-        val editor: SharedPreferences.Editor = prefs.edit()
-        val checkedItem = prefs.getInt("theme", 2)
+        val theme = prefs.getInt("theme", AppCompatDelegate.MODE_NIGHT_FOLLOW_SYSTEM)
+        debug("Theme from prefs: $theme")
 
-        builder.setSingleChoiceItems(styles, checkedItem) { dialog, which ->
-
-            when (which) {
-                0 -> {
-                    AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_NO)
-                    editor.putInt("theme", 0)
-                    editor.apply()
-
-                    delegate.applyDayNight()
-                    dialog.dismiss()
-                }
-                1 -> {
-                    AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_YES)
-                    editor.putInt("theme", 1)
-                    editor.apply()
-
-                    delegate.applyDayNight()
-                    dialog.dismiss()
-                }
-                2 -> {
-                    AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_FOLLOW_SYSTEM)
-                    editor.putInt("theme", 2)
-                    editor.apply()
-
-                    delegate.applyDayNight()
-                    dialog.dismiss()
-                }
-
-            }
+        builder.setSingleChoiceItems(
+            styles.keys.toTypedArray(),
+            styles.values.indexOf(theme)
+        ) { dialog, position ->
+            val selectedTheme = styles.values.elementAt(position)
+            debug("Set theme pref to $selectedTheme")
+            prefs.edit().putInt("theme", selectedTheme).apply()
+            AppCompatDelegate.setDefaultNightMode(selectedTheme)
+            dialog.dismiss()
         }
 
         val dialog = builder.create()
         dialog.show()
     }
 
-    private fun setUITheme(prefs: SharedPreferences) {
-        /// Read theme settings from preferences and set it
-        /// If nothing is found set FOLLOW SYSTEM option
-
-        when (prefs.getInt("theme", 2)) {
-            0 -> {
-                AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_NO)
-                delegate.applyDayNight()
-            }
-            1 -> {
-                AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_YES)
-                delegate.applyDayNight()
-            }
-            2 -> {
-                AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_FOLLOW_SYSTEM)
-                delegate.applyDayNight()
-            }
-        }
-    }
-
     private fun chooseLangDialog() {
-
         /// Prepare dialog and its items
         val builder = MaterialAlertDialogBuilder(this)
         builder.setTitle(getString(R.string.preferences_language))
 
-        val languageLabels by lazy { resources.getStringArray(R.array.language_entries) }
-        val languageValues by lazy { resources.getStringArray(R.array.language_values) }
+        val languageTags = LanguageUtils.getLanguageTags(this)
 
         /// Load preferences and its value
-        val prefs = UIViewModel.getPreferences(this)
-        val editor: SharedPreferences.Editor = prefs.edit()
-        val lang = prefs.getString("lang", "zz")
+        val lang = LanguageUtils.getLocale()
         debug("Lang from prefs: $lang")
 
         builder.setSingleChoiceItems(
-            languageLabels,
-            languageValues.indexOf(lang)
-        ) { dialog, which ->
-            val selectedLang = languageValues[which]
+            languageTags.keys.toTypedArray(),
+            languageTags.values.indexOf(lang)
+        ) { dialog, position ->
+            val selectedLang = languageTags.values.elementAt(position)
             debug("Set lang pref to $selectedLang")
-            editor.putString("lang", selectedLang)
-            editor.apply()
+            LanguageUtils.setLocale(selectedLang)
             dialog.dismiss()
         }
         val dialog = builder.create()

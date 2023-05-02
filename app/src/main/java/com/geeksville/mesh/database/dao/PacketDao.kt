@@ -47,4 +47,25 @@ interface PacketDao {
         val new = data.copy(status = m)
         findDataPacket(data)?.let { update(it.copy(data = new)) }
     }
+
+    @Query("Select data from packet order by received_time asc")
+    fun getDataPackets(): List<DataPacket>
+
+    @Transaction
+    fun getDataPacketById(requestId: Int): DataPacket? {
+        return getDataPackets().lastOrNull { it.id == requestId }
+    }
+
+    @Transaction
+    fun getQueuedPackets(): List<DataPacket>? =
+        getDataPackets().filter { it.status in setOf(MessageStatus.ENROUTE, MessageStatus.QUEUED) }
+
+    @Query("Select * from packet where port_num = 8 order by received_time asc")
+    fun getAllWaypoints(): List<Packet>
+
+    @Transaction
+    fun deleteWaypoint(id: Int) {
+        val uuidList = getAllWaypoints().filter { it.data.waypoint?.id == id }.map { it.uuid }
+        deleteMessages(uuidList)
+    }
 }

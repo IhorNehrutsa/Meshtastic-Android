@@ -4,6 +4,8 @@ package com.geeksville.mesh;
 // Declare any non-default types here with import statements
 parcelable DataPacket;
 parcelable NodeInfo;
+parcelable MeshUser;
+parcelable Position;
 parcelable MyNodeInfo;
 
 /**
@@ -19,6 +21,13 @@ The intent you use to reach the service should look like this:
                 "com.geeksville.mesh.service.MeshService"
             )
         }
+
+In Android 11+ you *may* need to add the following to the client app's manifest to allow binding of the mesh service:
+<queries>
+    <package android:name="com.geeksville.mesh" />
+</queries>
+For additional information, see https://developer.android.com/guide/topics/manifest/queries-element
+
 
 Once you have bound to the service you should register your broadcast receivers per https://developer.android.com/guide/components/broadcasts#context-registered-receivers
 
@@ -45,14 +54,18 @@ interface IMeshService {
     void subscribeReceiver(String packageName, String receiverName);
 
     /**
-    * Set the ID info for this node
-
-    If myId is null, then the existing unique node ID is preserved, only the human visible longName/shortName is changed
+    * Set the user info for this node
     */
-    void setOwner(String myId, String longName, String shortName, boolean isLicensed);
+    void setOwner(in MeshUser user);
+
+    void setRemoteOwner(in int destNum, in byte []payload);
+    void getRemoteOwner(in int requestId, in int destNum);
 
     /// Return my unique user ID string
     String getMyId();
+
+    /// Return a unique packet ID
+    int getPacketId();
 
     /*
     Send a packet to a specified node name
@@ -77,13 +90,29 @@ interface IMeshService {
     /// It sets a Config protobuf via admin packet
     void setConfig(in byte []payload);
 
-    /// This method is only intended for use in our GUI, so the user can set radio options
-    /// It sets a ModuleConfig protobuf via admin packet
-    void setModuleConfig(in byte []payload);
+    /// Set and get a Config protobuf via admin packet
+    void setRemoteConfig(in int destNum, in byte []payload);
+    void getRemoteConfig(in int requestId, in int destNum, in int configTypeValue);
+
+    /// Set and get a ModuleConfig protobuf via admin packet
+    void setModuleConfig(in int destNum, in byte []payload);
+    void getModuleConfig(in int requestId, in int destNum, in int moduleConfigTypeValue);
+
+    /// Set and get the Ext Notification Ringtone string via admin packet
+    void setRingtone(in int destNum, in String ringtone);
+    void getRingtone(in int requestId, in int destNum);
+
+    /// Set and get the Canned Message Messages string via admin packet
+    void setCannedMessages(in int destNum, in String messages);
+    void getCannedMessages(in int requestId, in int destNum);
 
     /// This method is only intended for use in our GUI, so the user can set radio options
     /// It sets a Channel protobuf via admin packet
     void setChannel(in byte []payload);
+
+    /// Set and get a Channel protobuf via admin packet
+    void setRemoteChannel(in int destNum, in byte []payload);
+    void getRemoteChannel(in int requestId, in int destNum, in int channelIndex);
 
     /// Send beginEditSettings admin packet to nodeNum
     void beginEditSettings();
@@ -92,19 +121,25 @@ interface IMeshService {
     void commitEditSettings();
 
     /// Send position packet with wantResponse to nodeNum
-    void requestPosition(in int idNum, in double lat, in double lon, in int alt);
+    void requestPosition(in int destNum, in Position position);
+
+    /// Send traceroute packet with wantResponse to nodeNum
+    void requestTraceroute(in int requestId, in int destNum);
 
     /// Send Shutdown admin packet to nodeNum
-    void requestShutdown(in int idNum);
+    void requestShutdown(in int destNum);
 
     /// Send Reboot admin packet to nodeNum
-    void requestReboot(in int idNum);
+    void requestReboot(in int destNum);
 
     /// Send FactoryReset admin packet to nodeNum
-    void requestFactoryReset(in int idNum);
+    void requestFactoryReset(in int destNum);
 
     /// Send NodedbReset admin packet to nodeNum
-    void requestNodedbReset(in int idNum);
+    void requestNodedbReset(in int destNum);
+
+    /// Returns a ChannelSet protobuf
+    byte []getChannelSet();
 
     /**
     Is the packet radio currently connected to the phone?  Returns a ConnectionState string.

@@ -1,5 +1,6 @@
 package com.geeksville.mesh
 
+import android.graphics.Color
 import android.os.Parcelable
 import com.geeksville.mesh.util.bearing
 import com.geeksville.mesh.util.latLongToMeter
@@ -19,7 +20,7 @@ data class MeshUser(
     val longName: String,
     val shortName: String,
     val hwModel: MeshProtos.HardwareModel,
-    val isLicensed: Boolean,
+    val isLicensed: Boolean = false,
 ) : Parcelable {
 
     override fun toString(): String {
@@ -153,12 +154,21 @@ data class NodeInfo(
     var environmentMetrics: EnvironmentMetrics? = null,
 ) : Parcelable {
 
+    val colors: Pair<Int, Int>
+        get() { // returns foreground and background @ColorInt for each 'num'
+            val r = (num and 0xFF0000) shr 16
+            val g = (num and 0x00FF00) shr 8
+            val b = num and 0x0000FF
+            val brightness = ((r * 0.299) + (g * 0.587) + (b * 0.114)) / 255
+            return Pair(if (brightness > 0.5) Color.BLACK else Color.WHITE, Color.rgb(r, g, b))
+        }
+
     val batteryLevel get() = deviceMetrics?.batteryLevel
     val voltage get() = deviceMetrics?.voltage
     val batteryStr get() = if (batteryLevel in 1..100) String.format("%d%%", batteryLevel) else ""
 
     private fun envFormat(f: String, unit: String, env: Float?): String =
-        if (env != null && env > 0f) String.format(f + unit, env) else ""
+        if (env != null && env != 0f) String.format(f + unit, env) else ""
 
     val envMetricStr
         get() = envFormat("%.1f", "°C ", environmentMetrics?.temperature) +

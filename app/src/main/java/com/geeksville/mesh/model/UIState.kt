@@ -7,6 +7,7 @@ import android.net.Uri
 import android.os.RemoteException
 import android.view.Menu
 import androidx.core.content.edit
+import androidx.lifecycle.asFlow
 import androidx.lifecycle.LiveData
 import androidx.lifecycle.MutableLiveData
 import androidx.lifecycle.ViewModel
@@ -23,6 +24,7 @@ import com.geeksville.mesh.database.entity.MeshLog
 import com.geeksville.mesh.database.entity.QuickChatAction
 import com.geeksville.mesh.LocalOnlyProtos.LocalConfig
 import com.geeksville.mesh.LocalOnlyProtos.LocalModuleConfig
+import com.geeksville.mesh.MeshProtos.User
 import com.geeksville.mesh.database.PacketRepository
 import com.geeksville.mesh.repository.datastore.ChannelSetRepository
 import com.geeksville.mesh.repository.datastore.LocalConfigRepository
@@ -33,6 +35,7 @@ import com.geeksville.mesh.util.positionToMeter
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
@@ -89,6 +92,10 @@ class UIViewModel @Inject constructor(
     private val preferences: SharedPreferences
 ) : ViewModel(), Logging {
 
+    var actionBarMenu: Menu? = null
+    var meshService: IMeshService? = null
+    val nodeDB = NodeDB(this)
+
     private val _meshLog = MutableStateFlow<List<MeshLog>>(emptyList())
     val meshLog: StateFlow<List<MeshLog>> = _meshLog
 
@@ -108,6 +115,13 @@ class UIViewModel @Inject constructor(
 
     private val _quickChatActions = MutableStateFlow<List<QuickChatAction>>(emptyList())
     val quickChatActions: StateFlow<List<QuickChatAction>> = _quickChatActions
+
+    private val _ourNodeInfo = MutableStateFlow<NodeInfo?>(null)
+    val ourNodeInfo: StateFlow<NodeInfo?> = _ourNodeInfo
+
+    private val requestId = MutableStateFlow<Int?>(null)
+    private val _packetResponse = MutableStateFlow<MeshLog?>(null)
+    val packetResponse: StateFlow<MeshLog?> = _packetResponse
 
     init {
         viewModelScope.launch {
@@ -134,6 +148,16 @@ class UIViewModel @Inject constructor(
         channelSetRepository.channelSetFlow.onEach { channelSet ->
             _channels.value = ChannelSet(channelSet)
         }.launchIn(viewModelScope)
+        combine(nodeDB.nodes.asFlow(), nodeDB.myId.asFlow()) { nodes, id -> nodes[id] }.onEach {
+            _ourNodeInfo.value = it
+        }.launchIn(viewModelScope)
+
+        combine(_meshLog, requestId) { packet, requestId ->
+            requestId?.run { packet.lastOrNull { it.meshPacket?.decoded?.requestId == requestId } }
+        }.onEach {
+            _packetResponse.value = it
+        }.launchIn(viewModelScope)
+
         debug("ViewModel created")
     }
 
@@ -149,18 +173,53 @@ class UIViewModel @Inject constructor(
 
     @OptIn(ExperimentalCoroutinesApi::class)
     val contacts: LiveData<Map<String, Packet>> = _packets.mapLatest { list ->
-        list.associateBy { packet -> packet.contact_key }
-            .filter { it.value.port_num == Portnums.PortNum.TEXT_MESSAGE_APP_VALUE }
+        list.filter { it.port_num == Portnums.PortNum.TEXT_MESSAGE_APP_VALUE }
+            .associateBy { packet -> packet.contact_key }
     }.asLiveData()
 
     @OptIn(ExperimentalCoroutinesApi::class)
-    val waypoints: LiveData<Map<Int?, Packet>> = _packets.mapLatest { list ->
-        list.associateBy { packet -> packet.data.waypoint?.id }
-            .filter { it.value.port_num == Portnums.PortNum.WAYPOINT_APP_VALUE }
+    val waypoints: LiveData<Map<Int, Packet>> = _packets.mapLatest { list ->
+        list.filter { it.port_num == Portnums.PortNum.WAYPOINT_APP_VALUE }
+            .associateBy { packet -> packet.data.waypoint!!.id }
+            .filterValues { it.data.waypoint!!.expire > System.currentTimeMillis() / 1000 }
     }.asLiveData()
 
-    fun sendMessage(str: String, channel: Int = 0, dest: String = DataPacket.ID_BROADCAST) {
-        val p = DataPacket(dest, channel, str)
+    /**
+     * Called immediately after activity observes packetResponse
+     */
+    fun clearPacketResponse() {
+        requestId.value = null
+        _packetResponse.value = null
+    }
+
+    fun generatePacketId(): Int? {
+        return try {
+            meshService?.packetId
+        } catch (ex: RemoteException) {
+            errormsg("RemoteException: ${ex.message}")
+            return null
+        }
+    }
+
+    fun sendMessage(str: String, contactKey: String = "0${DataPacket.ID_BROADCAST}") {
+        // contactKey: unique contact key filter (channel)+(nodeId)
+        val channel = contactKey[0].digitToIntOrNull()
+        val dest = if (channel != null) contactKey.substring(1) else contactKey
+
+        val p = DataPacket(dest, channel ?: 0, str)
+        sendDataPacket(p)
+    }
+
+    fun sendWaypoint(wpt: MeshProtos.Waypoint, contactKey: String = "0${DataPacket.ID_BROADCAST}") {
+        // contactKey: unique contact key filter (channel)+(nodeId)
+        val channel = contactKey[0].digitToIntOrNull()
+        val dest = if (channel != null) contactKey.substring(1) else contactKey
+
+        val p = DataPacket(dest, channel ?: 0, wpt)
+        if (wpt.id != 0) sendDataPacket(p)
+    }
+
+    private fun sendDataPacket(p: DataPacket) {
         try {
             meshService?.send(p)
         } catch (ex: RemoteException) {
@@ -168,9 +227,78 @@ class UIViewModel @Inject constructor(
         }
     }
 
-    fun requestPosition(destNum: Int, lat: Double = 0.0, lon: Double = 0.0, alt: Int = 0) {
+    private fun request(
+        destNum: Int,
+        requestAction: suspend (IMeshService, Int, Int) -> Unit,
+        errorMessage: String,
+        configType: Int = 0
+    ) = viewModelScope.launch {
+        meshService?.let { service ->
+            val packetId = service.packetId
+            try {
+                requestAction(service, packetId, destNum)
+                requestId.value = packetId
+            } catch (ex: RemoteException) {
+                errormsg("$errorMessage: ${ex.message}")
+            }
+        }
+    }
+
+    fun getOwner(destNum: Int) = request(
+        destNum,
+        { service, packetId, dest -> service.getRemoteOwner(packetId, dest) },
+        "Request getOwner error"
+    )
+
+    fun getChannel(destNum: Int, index: Int) = request(
+        destNum,
+        { service, packetId, dest -> service.getRemoteChannel(packetId, dest, index) },
+        "Request getChannel error"
+    )
+
+    fun getConfig(destNum: Int, configType: Int) = request(
+        destNum,
+        { service, packetId, dest -> service.getRemoteConfig(packetId, dest, configType) },
+        "Request getConfig error",
+        configType
+    )
+
+    fun getModuleConfig(destNum: Int, configType: Int) = request(
+        destNum,
+        { service, packetId, dest -> service.getModuleConfig(packetId, dest, configType) },
+        "Request getModuleConfig error",
+        configType
+    )
+
+    fun setRingtone(destNum: Int, ringtone: String) {
+        meshService?.setRingtone(destNum, ringtone)
+    }
+
+    fun getRingtone(destNum: Int) = request(
+        destNum,
+        { service, packetId, dest -> service.getRingtone(packetId, dest) },
+        "Request getRingtone error"
+    )
+
+    fun setCannedMessages(destNum: Int, messages: String) {
+        meshService?.setCannedMessages(destNum, messages)
+    }
+
+    fun getCannedMessages(destNum: Int) = request(
+        destNum,
+        { service, packetId, dest -> service.getCannedMessages(packetId, dest) },
+        "Request getCannedMessages error"
+    )
+
+    fun requestTraceroute(destNum: Int) = request(
+        destNum,
+        { service, packetId, dest -> service.requestTraceroute(packetId, dest) },
+        "Request traceroute error"
+    )
+
+    fun requestPosition(destNum: Int, position: Position = Position(0.0, 0.0, 0)) {
         try {
-            meshService?.requestPosition(destNum, lat, lon, alt)
+            meshService?.requestPosition(destNum, position)
         } catch (ex: RemoteException) {
             errormsg("Request position error: ${ex.message}")
         }
@@ -188,22 +316,20 @@ class UIViewModel @Inject constructor(
         packetRepository.deleteMessages(uuidList)
     }
 
+    fun deleteWaypoint(id: Int) = viewModelScope.launch(Dispatchers.IO) {
+        packetRepository.deleteWaypoint(id)
+    }
+
     companion object {
         fun getPreferences(context: Context): SharedPreferences =
             context.getSharedPreferences("ui-prefs", Context.MODE_PRIVATE)
     }
 
-    var actionBarMenu: Menu? = null
-
-    var meshService: IMeshService? = null
-
-    val nodeDB = NodeDB(this)
-
     /// Connection state to our radio device
     private val _connectionState = MutableLiveData(MeshService.ConnectionState.DISCONNECTED)
     val connectionState: LiveData<MeshService.ConnectionState> get() = _connectionState
 
-    fun isConnected() = _connectionState.value == MeshService.ConnectionState.CONNECTED
+    fun isConnected() = _connectionState.value != MeshService.ConnectionState.DISCONNECTED
 
     fun setConnectionState(connectionState: MeshService.ConnectionState) {
         _connectionState.value = connectionState
@@ -248,13 +374,10 @@ class UIViewModel @Inject constructor(
     @Suppress("MemberVisibilityCanBePrivate")
     val isRouter: Boolean = config.device.role == Config.DeviceConfig.Role.ROUTER
 
-    // We consider hasWifi = ESP32
-    fun hasGPS() = myNodeInfo.value?.hasGPS == true
-    fun hasWifi() = myNodeInfo.value?.hasWifi == true
-
     /// hardware info about our local device (can be null)
     private val _myNodeInfo = MutableLiveData<MyNodeInfo?>()
     val myNodeInfo: LiveData<MyNodeInfo?> get() = _myNodeInfo
+    val myNodeNum get() = _myNodeInfo.value?.myNodeNum
 
     fun setMyNodeInfo(info: MyNodeInfo?) {
         _myNodeInfo.value = info
@@ -283,39 +406,9 @@ class UIViewModel @Inject constructor(
         }
     }
 
-    inline fun updateDeviceConfig(crossinline body: (Config.DeviceConfig) -> Config.DeviceConfig) {
-        val data = body(config.device)
-        setConfig(config { device = data })
-    }
-
-    inline fun updatePositionConfig(crossinline body: (Config.PositionConfig) -> Config.PositionConfig) {
-        val data = body(config.position)
-        setConfig(config { position = data })
-    }
-
-    inline fun updatePowerConfig(crossinline body: (Config.PowerConfig) -> Config.PowerConfig) {
-        val data = body(config.power)
-        setConfig(config { power = data })
-    }
-
-    inline fun updateNetworkConfig(crossinline body: (Config.NetworkConfig) -> Config.NetworkConfig) {
-        val data = body(config.network)
-        setConfig(config { network = data })
-    }
-
-    inline fun updateDisplayConfig(crossinline body: (Config.DisplayConfig) -> Config.DisplayConfig) {
-        val data = body(config.display)
-        setConfig(config { display = data })
-    }
-
-    inline fun updateLoraConfig(crossinline body: (Config.LoRaConfig) -> Config.LoRaConfig) {
+    private inline fun updateLoraConfig(crossinline body: (Config.LoRaConfig) -> Config.LoRaConfig) {
         val data = body(config.lora)
         setConfig(config { lora = data })
-    }
-
-    inline fun updateBluetoothConfig(crossinline body: (Config.BluetoothConfig) -> Config.BluetoothConfig) {
-        val data = body(config.bluetooth)
-        setConfig(config { bluetooth = data })
     }
 
     // Set the radio config (also updates our saved copy in preferences)
@@ -323,48 +416,12 @@ class UIViewModel @Inject constructor(
         meshService?.setConfig(config.toByteArray())
     }
 
-    inline fun updateMQTTConfig(crossinline body: (ModuleConfig.MQTTConfig) -> ModuleConfig.MQTTConfig) {
-        val data = body(module.mqtt)
-        setModuleConfig(moduleConfig { mqtt = data })
+    fun setRemoteConfig(destNum: Int, config: Config) {
+        meshService?.setRemoteConfig(destNum, config.toByteArray())
     }
 
-    inline fun updateSerialConfig(crossinline body: (ModuleConfig.SerialConfig) -> ModuleConfig.SerialConfig) {
-        val data = body(module.serial)
-        setModuleConfig(moduleConfig { serial = data })
-    }
-
-    inline fun updateExternalNotificationConfig(crossinline body: (ModuleConfig.ExternalNotificationConfig) -> ModuleConfig.ExternalNotificationConfig) {
-        val data = body(module.externalNotification)
-        setModuleConfig(moduleConfig { externalNotification = data })
-    }
-
-    inline fun updateStoreForwardConfig(crossinline body: (ModuleConfig.StoreForwardConfig) -> ModuleConfig.StoreForwardConfig) {
-        val data = body(module.storeForward)
-        setModuleConfig(moduleConfig { storeForward = data })
-    }
-
-    inline fun updateRangeTestConfig(crossinline body: (ModuleConfig.RangeTestConfig) -> ModuleConfig.RangeTestConfig) {
-        val data = body(module.rangeTest)
-        setModuleConfig(moduleConfig { rangeTest = data })
-    }
-
-    inline fun updateTelemetryConfig(crossinline body: (ModuleConfig.TelemetryConfig) -> ModuleConfig.TelemetryConfig) {
-        val data = body(module.telemetry)
-        setModuleConfig(moduleConfig { telemetry = data })
-    }
-
-    inline fun updateCannedMessageConfig(crossinline body: (ModuleConfig.CannedMessageConfig) -> ModuleConfig.CannedMessageConfig) {
-        val data = body(module.cannedMessage)
-        setModuleConfig(moduleConfig { cannedMessage = data })
-    }
-
-    inline fun updateAudioConfig(crossinline body: (ModuleConfig.AudioConfig) -> ModuleConfig.AudioConfig) {
-        val data = body(module.audio)
-        setModuleConfig(moduleConfig { audio = data })
-    }
-
-    fun setModuleConfig(config: ModuleConfig) {
-        meshService?.setModuleConfig(config.toByteArray())
+    fun setModuleConfig(destNum: Int, config: ModuleConfig) {
+        meshService?.setModuleConfig(destNum, config.toByteArray())
     }
 
     /// Convert the channels array to and from [AppOnlyProtos.ChannelSet]
@@ -401,6 +458,10 @@ class UIViewModel @Inject constructor(
         this._channelSet = channelSet.protobuf
     }
 
+    fun setRemoteChannel(destNum: Int, channel: ChannelProtos.Channel) {
+        meshService?.setRemoteChannel(destNum, channel.toByteArray())
+    }
+
     /// our name in hte radio
     /// Note, we generate owner initials automatically for now
     /// our activity will read this from prefs or set it to the empty string
@@ -417,10 +478,9 @@ class UIViewModel @Inject constructor(
         }
     }
 
-    // clean up all this nasty owner state management FIXME
-    fun setOwner(longName: String? = null, shortName: String? = null, isLicensed: Boolean? = null) {
+    fun setOwner(user: MeshUser) = with(user) {
 
-        longName?.trim()?.let { ownerName ->
+        longName.trim().let { ownerName ->
             // note: we allow an empty user string to be written to prefs
             _ownerName.value = ownerName
             preferences.edit { putString("owner", ownerName) }
@@ -429,15 +489,20 @@ class UIViewModel @Inject constructor(
         // Note: we are careful to not set a new unique ID
         if (_ownerName.value!!.isNotEmpty())
             try {
-                meshService?.setOwner(
-                    null,
-                    _ownerName.value,
-                    shortName?.trim() ?: getInitials(_ownerName.value!!),
-                    isLicensed ?: false
-                ) // Note: we use ?. here because we might be running in the emulator
+                // Note: we use ?. here because we might be running in the emulator
+                meshService?.setOwner(user)
             } catch (ex: RemoteException) {
                 errormsg("Can't set username on device, is device offline? ${ex.message}")
             }
+    }
+
+    fun setRemoteOwner(destNum: Int, user: User) {
+        try {
+            // Note: we use ?. here because we might be running in the emulator
+            meshService?.setRemoteOwner(destNum, user.toByteArray())
+        } catch (ex: RemoteException) {
+            errormsg("Can't set username on device, is device offline? ${ex.message}")
+        }
     }
 
     val adminChannelIndex: Int
@@ -482,7 +547,7 @@ class UIViewModel @Inject constructor(
         viewModelScope.launch(Dispatchers.Main) {
             // Extract distances to this device from position messages and put (node,SNR,distance) in
             // the file_uri
-            val myNodeNum = myNodeInfo.value?.myNodeNum ?: return@launch
+            val myNodeNum = myNodeNum ?: return@launch
 
             // Capture the current node value while we're still on main thread
             val nodes = nodeDB.nodes.value ?: emptyMap()
@@ -506,7 +571,7 @@ class UIViewModel @Inject constructor(
                 meshLogRepository.getAllLogsInReceiveOrder(Int.MAX_VALUE).first().forEach { packet ->
                     // If we get a NodeInfo packet, use it to update our position data (if valid)
                     packet.nodeInfo?.let { nodeInfo ->
-                        positionToPos.invoke(nodeInfo.position)?.let { _ ->
+                        positionToPos.invoke(nodeInfo.position)?.let {
                             nodePositions[nodeInfo.num] = nodeInfo.position
                         }
                     }
@@ -514,7 +579,7 @@ class UIViewModel @Inject constructor(
                     packet.meshPacket?.let { proto ->
                         // If the packet contains position data then use it to update, if valid
                         packet.position?.let { position ->
-                            positionToPos.invoke(position)?.let { _ ->
+                            positionToPos.invoke(position)?.let {
                                 nodePositions[proto.from] = position
                             }
                         }
