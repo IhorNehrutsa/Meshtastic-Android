@@ -1,21 +1,34 @@
 package com.geeksville.mesh.ui
 
+import android.app.Activity
+import android.content.Intent
 import android.os.Bundle
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.annotation.StringRes
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.wrapContentSize
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.material.AlertDialog
+import androidx.compose.material.Button
+import androidx.compose.material.ButtonDefaults
 import androidx.compose.material.Card
 import androidx.compose.material.ContentAlpha
 import androidx.compose.material.Icon
 import androidx.compose.material.MaterialTheme
+import androidx.compose.material.OutlinedButton
 import androidx.compose.material.Text
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.twotone.KeyboardArrowRight
@@ -29,10 +42,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.ViewCompositionStrategy
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
@@ -54,9 +67,9 @@ import com.geeksville.mesh.NodeInfo
 import com.geeksville.mesh.Portnums
 import com.geeksville.mesh.R
 import com.geeksville.mesh.android.Logging
-import com.geeksville.mesh.channel
-import com.geeksville.mesh.channelSettings
 import com.geeksville.mesh.config
+import com.geeksville.mesh.deviceProfile
+import com.geeksville.mesh.model.Channel
 import com.geeksville.mesh.model.UIViewModel
 import com.geeksville.mesh.moduleConfig
 import com.geeksville.mesh.service.MeshService
@@ -68,10 +81,12 @@ import com.geeksville.mesh.ui.components.config.CannedMessageConfigItemList
 import com.geeksville.mesh.ui.components.config.ChannelSettingsItemList
 import com.geeksville.mesh.ui.components.config.DeviceConfigItemList
 import com.geeksville.mesh.ui.components.config.DisplayConfigItemList
+import com.geeksville.mesh.ui.components.config.EditDeviceProfileDialog
 import com.geeksville.mesh.ui.components.config.ExternalNotificationConfigItemList
 import com.geeksville.mesh.ui.components.config.LoRaConfigItemList
 import com.geeksville.mesh.ui.components.config.MQTTConfigItemList
 import com.geeksville.mesh.ui.components.config.NetworkConfigItemList
+import com.geeksville.mesh.ui.components.config.PacketResponseStateDialog
 import com.geeksville.mesh.ui.components.config.PositionConfigItemList
 import com.geeksville.mesh.ui.components.config.PowerConfigItemList
 import com.geeksville.mesh.ui.components.config.RangeTestConfigItemList
@@ -127,6 +142,20 @@ enum class ModuleDest(val title: String, val route: String, val config: ModuleCo
     REMOTE_HARDWARE("Remote Hardware", "remote_hardware", ModuleConfigType.REMOTEHARDWARE_CONFIG);
 }
 
+/**
+ * This sealed class defines each possible state of a packet response.
+ */
+sealed class PacketResponseState {
+    object Loading : PacketResponseState() {
+        var total: Int = 0
+        var completed: Int = 0
+    }
+
+    data class Success(val packets: List<String>) : PacketResponseState()
+    object Empty : PacketResponseState()
+    data class Error(val error: String) : PacketResponseState()
+}
+
 @Composable
 fun RadioConfigNavHost(node: NodeInfo, viewModel: UIViewModel = viewModel()) {
     val navController = rememberNavController()
@@ -136,6 +165,7 @@ fun RadioConfigNavHost(node: NodeInfo, viewModel: UIViewModel = viewModel()) {
     val connected = connectionState == MeshService.ConnectionState.CONNECTED
 
     val destNum = node.num
+    val isLocal = destNum == viewModel.myNodeNum
     val maxChannels = viewModel.myNodeInfo.value?.maxChannels ?: 8
 
     var userConfig by remember { mutableStateOf(MeshProtos.User.getDefaultInstance()) }
@@ -148,49 +178,121 @@ fun RadioConfigNavHost(node: NodeInfo, viewModel: UIViewModel = viewModel()) {
     var cannedMessageMessages by remember { mutableStateOf("") }
 
     val configResponse by viewModel.packetResponse.collectAsStateWithLifecycle()
-    var isWaiting by remember { mutableStateOf(false) }
+    val deviceProfile by viewModel.deviceProfile.collectAsStateWithLifecycle()
+    var packetResponseState by remember { mutableStateOf<PacketResponseState>(PacketResponseState.Empty) }
+    val isWaiting = packetResponseState !is PacketResponseState.Empty
+    var showEditDeviceProfileDialog by remember { mutableStateOf(false) }
+
+    val importConfigLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) {
+        if (it.resultCode == Activity.RESULT_OK) {
+            showEditDeviceProfileDialog = true
+            it.data?.data?.let { file_uri -> viewModel.importProfile(file_uri) }
+        }
+    }
+
+    val exportConfigLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) {
+        if (it.resultCode == Activity.RESULT_OK) {
+            it.data?.data?.let { file_uri -> viewModel.exportProfile(file_uri) }
+        }
+    }
+
+    if (showEditDeviceProfileDialog) EditDeviceProfileDialog(
+        title = if (deviceProfile != null) "Import configuration" else "Export configuration",
+        deviceProfile = deviceProfile ?: with(viewModel) {
+            deviceProfile {
+                ourNodeInfo.value?.user?.let {
+                    longName = it.longName
+                    shortName = it.shortName
+                }
+                channelUrl = channels.value.getChannelUrl().toString()
+                config = localConfig.value
+                this.moduleConfig = module
+            }
+        },
+        onAddClick = {
+            showEditDeviceProfileDialog = false
+            if (deviceProfile != null) {
+                viewModel.installProfile(it)
+            } else {
+                viewModel.setDeviceProfile(it)
+                val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+                    addCategory(Intent.CATEGORY_OPENABLE)
+                    type = "application/*"
+                    putExtra(Intent.EXTRA_TITLE, "${destNum.toUInt()}.cfg")
+                }
+                exportConfigLauncher.launch(intent)
+            }
+        },
+        onDismissRequest = {
+            showEditDeviceProfileDialog = false
+            viewModel.setDeviceProfile(null)
+        }
+    )
+
+    if (isWaiting) PacketResponseStateDialog(
+        packetResponseState,
+        onDismiss = {
+            packetResponseState = PacketResponseState.Empty
+            viewModel.clearPacketResponse()
+        }
+    )
 
     if (isWaiting) LaunchedEffect(configResponse) {
         val data = configResponse?.meshPacket?.decoded
+        if (data?.portnumValue == Portnums.PortNum.ROUTING_APP_VALUE) {
+            val parsed = MeshProtos.Routing.parseFrom(data.payload)
+            packetResponseState = if (parsed.errorReason == MeshProtos.Routing.Error.NONE) {
+                PacketResponseState.Success(emptyList())
+            } else {
+                PacketResponseState.Error(parsed.errorReason.toString())
+            }
+        }
         if (data?.portnumValue == Portnums.PortNum.ADMIN_APP_VALUE) {
+            viewModel.clearPacketResponse()
             val parsed = AdminProtos.AdminMessage.parseFrom(data.payload)
             when (parsed.payloadVariantCase) {
                 AdminProtos.AdminMessage.PayloadVariantCase.GET_CHANNEL_RESPONSE -> {
                     val response = parsed.getChannelResponse
-                    if (response.index + 1 < maxChannels) {
-                        // Stop once we get to the first disabled entry
-                        if (response.role != ChannelProtos.Channel.Role.DISABLED) {
+                    (packetResponseState as PacketResponseState.Loading).completed++
+                    // Stop once we get to the first disabled entry
+                    if (response.role != ChannelProtos.Channel.Role.DISABLED) {
+                        channelList.add(response.index, response.settings)
+                        if (response.index + 1 < maxChannels) {
                             // Not done yet, request next channel
-                            channelList.add(response.index, response.settings)
                             viewModel.getChannel(destNum, response.index + 1)
                         } else {
-                            // Received the last channel, start channel editor
-                            isWaiting = false
-                            navController.navigate("channels")
+                            // Received max channels, get lora config (for default channel names)
+                            viewModel.getConfig(destNum, ConfigType.LORA_CONFIG_VALUE)
                         }
                     } else {
-                        // Received max channels, start channel editor
-                        isWaiting = false
-                        navController.navigate("channels")
+                        // Received last channel, get lora config (for default channel names)
+                        viewModel.getConfig(destNum, ConfigType.LORA_CONFIG_VALUE)
                     }
                 }
 
                 AdminProtos.AdminMessage.PayloadVariantCase.GET_OWNER_RESPONSE -> {
-                    isWaiting = false
+                    packetResponseState = PacketResponseState.Empty
                     userConfig = parsed.getOwnerResponse
                     navController.navigate("user")
                 }
 
                 AdminProtos.AdminMessage.PayloadVariantCase.GET_CONFIG_RESPONSE -> {
-                    isWaiting = false
+                    // check destination: lora config or channel editor
+                    val goChannels = (packetResponseState as PacketResponseState.Loading).total > 1
+                    packetResponseState = PacketResponseState.Empty
                     val response = parsed.getConfigResponse
                     radioConfig = response
-                    enumValues<ConfigDest>().find { it.name == "${response.payloadVariantCase}" }
+                    if (goChannels) navController.navigate("channels")
+                    else enumValues<ConfigDest>().find { it.name == "${response.payloadVariantCase}" }
                         ?.let { navController.navigate(it.route) }
                 }
 
                 AdminProtos.AdminMessage.PayloadVariantCase.GET_MODULE_CONFIG_RESPONSE -> {
-                    isWaiting = false
+                    packetResponseState = PacketResponseState.Empty
                     val response = parsed.getModuleConfigResponse
                     moduleConfig = response
                     enumValues<ModuleDest>().find { it.name == "${response.payloadVariantCase}" }
@@ -199,11 +301,13 @@ fun RadioConfigNavHost(node: NodeInfo, viewModel: UIViewModel = viewModel()) {
 
                 AdminProtos.AdminMessage.PayloadVariantCase.GET_CANNED_MESSAGE_MODULE_MESSAGES_RESPONSE -> {
                     cannedMessageMessages = parsed.getCannedMessageModuleMessagesResponse
+                    (packetResponseState as PacketResponseState.Loading).completed++
                     viewModel.getModuleConfig(destNum, ModuleConfigType.CANNEDMSG_CONFIG_VALUE)
                 }
 
                 AdminProtos.AdminMessage.PayloadVariantCase.GET_RINGTONE_RESPONSE -> {
                     ringtone = parsed.getRingtoneResponse
+                    (packetResponseState as PacketResponseState.Loading).completed++
                     viewModel.getModuleConfig(destNum, ModuleConfigType.EXTNOTIF_CONFIG_VALUE)
                 }
 
@@ -216,23 +320,61 @@ fun RadioConfigNavHost(node: NodeInfo, viewModel: UIViewModel = viewModel()) {
         composable("home") {
             RadioSettingsScreen(
                 enabled = connected && !isWaiting,
+                isLocal = isLocal,
                 headerText = node.user?.longName ?: stringResource(R.string.unknown_username),
                 onRouteClick = { configType ->
-                    isWaiting = true
+                    packetResponseState = PacketResponseState.Loading.apply {
+                        total = 1
+                        completed = 0
+                    }
                     // clearAllConfigs() ?
                     when (configType) {
                         "USER" -> { viewModel.getOwner(destNum) }
                         "CHANNELS" -> {
+                            val maxPackets = maxChannels + 1 // for lora config
+                            (packetResponseState as PacketResponseState.Loading).total = maxPackets
                             channelList.clear()
                             viewModel.getChannel(destNum, 0)
                         }
+                        "IMPORT" -> {
+                            packetResponseState = PacketResponseState.Empty
+                            viewModel.setDeviceProfile(null)
+                            val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                                addCategory(Intent.CATEGORY_OPENABLE)
+                                type = "application/*"
+                            }
+                            importConfigLauncher.launch(intent)
+                        }
+                        "EXPORT" -> {
+                            packetResponseState = PacketResponseState.Empty
+                            showEditDeviceProfileDialog = true
+                        }
+
+                        "REBOOT" -> {
+                            viewModel.requestReboot(destNum)
+                        }
+
+                        "SHUTDOWN" -> {
+                            viewModel.requestShutdown(destNum)
+                        }
+
+                        "FACTORY_RESET" -> {
+                            viewModel.requestFactoryReset(destNum)
+                        }
+
+                        "NODEDB_RESET" -> {
+                            viewModel.requestNodedbReset(destNum)
+                        }
+
                         is ConfigType -> {
                             viewModel.getConfig(destNum, configType.number)
                         }
                         ModuleConfigType.CANNEDMSG_CONFIG -> {
+                            (packetResponseState as PacketResponseState.Loading).total = 2
                             viewModel.getCannedMessages(destNum)
                         }
                         ModuleConfigType.EXTNOTIF_CONFIG -> {
+                            (packetResponseState as PacketResponseState.Loading).total = 2
                             viewModel.getRingtone(destNum)
                         }
                         is ModuleConfigType -> {
@@ -245,28 +387,16 @@ fun RadioConfigNavHost(node: NodeInfo, viewModel: UIViewModel = viewModel()) {
         composable("channels") {
             ChannelSettingsItemList(
                 settingsList = channelList,
+                modemPresetName = Channel(Channel.default.settings, radioConfig.lora).name,
                 enabled = connected,
                 maxChannels = maxChannels,
                 focusManager = focusManager,
-                onSaveClicked = { channelListInput ->
+                onPositiveClicked = { channelListInput ->
                     focusManager.clearFocus()
-                    (0 until channelList.size.coerceAtLeast(channelListInput.size)).map { i ->
-                        channel {
-                            role = when (i) {
-                                0 -> ChannelProtos.Channel.Role.PRIMARY
-                                in 1 until channelListInput.size -> ChannelProtos.Channel.Role.SECONDARY
-                                else -> ChannelProtos.Channel.Role.DISABLED
-                            }
-                            index = i
-                            settings = channelListInput.getOrNull(i) ?: channelSettings { }
-                        }
-                    }.forEach { newChannel ->
-                        if (newChannel.settings != channelList.getOrNull(newChannel.index))
-                            viewModel.setRemoteChannel(destNum, newChannel)
-                    }
+                    viewModel.updateChannels(destNum, channelList, channelListInput)
                     channelList.clear()
                     channelList.addAll(channelListInput)
-                }
+                },
             )
         }
         composable("user") {
@@ -296,6 +426,7 @@ fun RadioConfigNavHost(node: NodeInfo, viewModel: UIViewModel = viewModel()) {
         }
         composable("position") {
             PositionConfigItemList(
+                isLocal = isLocal,
                 location = location,
                 positionConfig = radioConfig.position,
                 enabled = connected,
@@ -519,6 +650,9 @@ fun NavCard(
     enabled: Boolean,
     onClick: () -> Unit
 ) {
+    val color = if (enabled) MaterialTheme.colors.onSurface
+    else MaterialTheme.colors.onSurface.copy(alpha = ContentAlpha.disabled)
+
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -528,19 +662,84 @@ fun NavCard(
     ) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.padding(vertical = 16.dp, horizontal = 16.dp)
+            modifier = Modifier.padding(vertical = 12.dp, horizontal = 12.dp)
         ) {
             Text(
                 text = title,
                 style = MaterialTheme.typography.body1,
-                color = if (!enabled) MaterialTheme.colors.onSurface.copy(alpha = ContentAlpha.disabled) else Color.Unspecified,
+                color = color,
                 modifier = Modifier.weight(1f)
             )
             Icon(
                 Icons.TwoTone.KeyboardArrowRight, "trailingIcon",
                 modifier = Modifier.wrapContentSize(),
+                tint = color,
             )
         }
+    }
+}
+
+@Composable
+fun NavCard(@StringRes title: Int, enabled: Boolean, onClick: () -> Unit) {
+    NavCard(title = stringResource(title), enabled = enabled, onClick = onClick)
+}
+
+@Composable
+fun NavButton(@StringRes title: Int, enabled: Boolean, onClick: () -> Unit) {
+    var showDialog by remember { mutableStateOf(false) }
+    if (showDialog) AlertDialog(
+        onDismissRequest = { },
+        title = {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.Center,
+            ) {
+                Icon(
+                    painterResource(R.drawable.ic_twotone_warning_24),
+                    "warning",
+                    modifier = Modifier.padding(end = 8.dp)
+                )
+                Text(
+                    text = "${stringResource(title)}?\n")
+                Icon(
+                    painterResource(R.drawable.ic_twotone_warning_24),
+                    "warning",
+                    modifier = Modifier.padding(start = 8.dp)
+                )
+            }
+        },
+        buttons = {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.Center,
+            ) {
+                Button(
+                    modifier = Modifier.weight(1f),
+                    onClick = { showDialog = false }
+                ) { Text(stringResource(R.string.cancel)) }
+                Button(
+                    modifier = Modifier.weight(1f),
+                    onClick = {
+                        showDialog = false
+                        onClick()
+                    },
+                ) { Text(stringResource(R.string.send)) }
+            }
+        }
+    )
+
+    Column {
+        Spacer(modifier = Modifier.height(4.dp))
+        OutlinedButton(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(48.dp),
+            enabled = enabled,
+            onClick = { showDialog = true },
+            colors = ButtonDefaults.buttonColors(
+                disabledContentColor = MaterialTheme.colors.onSurface.copy(alpha = ContentAlpha.disabled)
+            )
+        ) { Text(text = stringResource(title)) }
     }
 }
 
@@ -548,6 +747,7 @@ fun NavCard(
 @Composable
 fun RadioSettingsScreen(
     enabled: Boolean = true,
+    isLocal: Boolean = true,
     headerText: String = "longName",
     onRouteClick: (Any) -> Unit = {},
 ) {
@@ -567,6 +767,17 @@ fun RadioSettingsScreen(
         items(ModuleDest.values()) { modules ->
             NavCard(modules.title, enabled = enabled) { onRouteClick(modules.config) }
         }
+
+        if (isLocal) {
+            item { PreferenceCategory("Import / Export") }
+            item { NavCard("Import configuration", enabled = enabled) { onRouteClick("IMPORT") } }
+            item { NavCard("Export configuration", enabled = enabled) { onRouteClick("EXPORT") } }
+        }
+
+        item { NavButton(R.string.reboot, enabled) { onRouteClick("REBOOT") } }
+        item { NavButton(R.string.shutdown, enabled) { onRouteClick("SHUTDOWN") } }
+        item { NavButton(R.string.factory_reset, enabled) { onRouteClick("FACTORY_RESET") } }
+        item { NavButton(R.string.nodedb_reset, enabled) { onRouteClick("NODEDB_RESET") } }
     }
 }
 

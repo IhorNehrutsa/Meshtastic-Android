@@ -15,6 +15,8 @@ import androidx.lifecycle.asLiveData
 import androidx.lifecycle.viewModelScope
 import com.geeksville.mesh.android.Logging
 import com.geeksville.mesh.*
+import com.geeksville.mesh.ChannelProtos.ChannelSettings
+import com.geeksville.mesh.ClientOnlyProtos.DeviceProfile
 import com.geeksville.mesh.ConfigProtos.Config
 import com.geeksville.mesh.ModuleConfigProtos.ModuleConfig
 import com.geeksville.mesh.database.MeshLogRepository
@@ -26,12 +28,11 @@ import com.geeksville.mesh.LocalOnlyProtos.LocalConfig
 import com.geeksville.mesh.LocalOnlyProtos.LocalModuleConfig
 import com.geeksville.mesh.MeshProtos.User
 import com.geeksville.mesh.database.PacketRepository
-import com.geeksville.mesh.repository.datastore.ChannelSetRepository
-import com.geeksville.mesh.repository.datastore.LocalConfigRepository
-import com.geeksville.mesh.repository.datastore.ModuleConfigRepository
+import com.geeksville.mesh.repository.datastore.RadioConfigRepository
 import com.geeksville.mesh.service.MeshService
 import com.geeksville.mesh.util.GPSFormat
 import com.geeksville.mesh.util.positionToMeter
+import com.google.protobuf.MessageLite
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -50,11 +51,12 @@ import org.osmdroid.views.MapView
 import org.osmdroid.views.overlay.FolderOverlay
 import java.io.BufferedWriter
 import java.io.FileNotFoundException
+import java.io.FileOutputStream
 import java.io.FileWriter
+import java.io.InputStream
 import java.text.SimpleDateFormat
 import java.util.Locale
 import javax.inject.Inject
-import kotlin.math.max
 import kotlin.math.roundToInt
 
 /// Given a human name, strip out the first letter of the first three words and return that as the initials for
@@ -83,11 +85,9 @@ fun getInitials(nameIn: String): String {
 @HiltViewModel
 class UIViewModel @Inject constructor(
     private val app: Application,
+    private val radioConfigRepository: RadioConfigRepository,
     private val meshLogRepository: MeshLogRepository,
-    private val channelSetRepository: ChannelSetRepository,
     private val packetRepository: PacketRepository,
-    private val localConfigRepository: LocalConfigRepository,
-    private val moduleConfigRepository: ModuleConfigRepository,
     private val quickChatActionRepository: QuickChatActionRepository,
     private val preferences: SharedPreferences
 ) : ViewModel(), Logging {
@@ -134,10 +134,10 @@ class UIViewModel @Inject constructor(
                 _packets.value = packets
             }
         }
-        localConfigRepository.localConfigFlow.onEach { config ->
+        radioConfigRepository.localConfigFlow.onEach { config ->
             _localConfig.value = config
         }.launchIn(viewModelScope)
-        moduleConfigRepository.moduleConfigFlow.onEach { config ->
+        radioConfigRepository.moduleConfigFlow.onEach { config ->
             _moduleConfig.value = config
         }.launchIn(viewModelScope)
         viewModelScope.launch {
@@ -145,17 +145,16 @@ class UIViewModel @Inject constructor(
                 _quickChatActions.value = actions
             }
         }
-        channelSetRepository.channelSetFlow.onEach { channelSet ->
+        radioConfigRepository.channelSetFlow.onEach { channelSet ->
             _channels.value = ChannelSet(channelSet)
         }.launchIn(viewModelScope)
         combine(nodeDB.nodes.asFlow(), nodeDB.myId.asFlow()) { nodes, id -> nodes[id] }.onEach {
             _ourNodeInfo.value = it
         }.launchIn(viewModelScope)
 
-        combine(_meshLog, requestId) { packet, requestId ->
-            requestId?.run { packet.lastOrNull { it.meshPacket?.decoded?.requestId == requestId } }
-        }.onEach {
-            _packetResponse.value = it
+        combine(meshLog, requestId) { packet, requestId ->
+            if (requestId != null) _packetResponse.value =
+                packet.firstOrNull { it.meshPacket?.decoded?.requestId == requestId }
         }.launchIn(viewModelScope)
 
         debug("ViewModel created")
@@ -296,6 +295,30 @@ class UIViewModel @Inject constructor(
         "Request traceroute error"
     )
 
+    fun requestShutdown(destNum: Int) = request(
+        destNum,
+        { service, packetId, dest -> service.requestShutdown(packetId, dest) },
+        "Request shutdown error"
+    )
+
+    fun requestReboot(destNum: Int) = request(
+        destNum,
+        { service, packetId, dest -> service.requestReboot(packetId, dest) },
+        "Request reboot error"
+    )
+
+    fun requestFactoryReset(destNum: Int) = request(
+        destNum,
+        { service, packetId, dest -> service.requestFactoryReset(packetId, dest) },
+        "Request factory reset error"
+    )
+
+    fun requestNodedbReset(destNum: Int) = request(
+        destNum,
+        { service, packetId, dest -> service.requestNodedbReset(packetId, dest) },
+        "Request NodeDB reset error"
+    )
+
     fun requestPosition(destNum: Int, position: Position = Position(0.0, 0.0, 0)) {
         try {
             meshService?.requestPosition(destNum, position)
@@ -371,8 +394,8 @@ class UIViewModel @Inject constructor(
         }
     }
 
-    @Suppress("MemberVisibilityCanBePrivate")
-    val isRouter: Boolean = config.device.role == Config.DeviceConfig.Role.ROUTER
+    // managed mode disables all access to configuration
+    val isManaged: Boolean get() = config.device.isManaged
 
     /// hardware info about our local device (can be null)
     private val _myNodeInfo = MutableLiveData<MyNodeInfo?>()
@@ -424,28 +447,55 @@ class UIViewModel @Inject constructor(
         meshService?.setModuleConfig(destNum, config.toByteArray())
     }
 
-    /// Convert the channels array to and from [AppOnlyProtos.ChannelSet]
-    private var _channelSet: AppOnlyProtos.ChannelSet
-        get() = channels.value.protobuf
-        set(value) {
-            (0 until max(_channelSet.settingsCount, value.settingsCount)).map { i ->
-                channel {
+    fun setModuleConfig(config: ModuleConfig) {
+        setModuleConfig(myNodeNum ?: return, config)
+    }
+
+    /**
+     * Updates channels to match the [new] list. Only channels with changes are updated.
+     *
+     * @param destNum Destination node number.
+     * @param old The current [ChannelSettings] list.
+     * @param new The updated [ChannelSettings] list.
+     */
+    fun updateChannels(
+        destNum: Int,
+        old: List<ChannelSettings>,
+        new: List<ChannelSettings>,
+    ) {
+        buildList {
+            for (i in 0..maxOf(old.lastIndex, new.lastIndex)) {
+                if (old.getOrNull(i) != new.getOrNull(i)) add(channel {
                     role = when (i) {
                         0 -> ChannelProtos.Channel.Role.PRIMARY
-                        in 1 until value.settingsCount -> ChannelProtos.Channel.Role.SECONDARY
+                        in 1..new.lastIndex -> ChannelProtos.Channel.Role.SECONDARY
                         else -> ChannelProtos.Channel.Role.DISABLED
                     }
                     index = i
-                    settings = value.settingsList.getOrNull(i) ?: channelSettings { }
-                }
-            }.forEach {
-                meshService?.setChannel(it.toByteArray())
+                    settings = new.getOrNull(i) ?: channelSettings { }
+                })
             }
+        }.forEach { setRemoteChannel(destNum, it) }
 
-            viewModelScope.launch {
-                channelSetRepository.clearSettings()
-                channelSetRepository.addAllSettings(value)
-            }
+        if (destNum == myNodeNum) viewModelScope.launch {
+            radioConfigRepository.replaceAllSettings(new)
+        }
+    }
+
+    private fun updateChannels(
+        old: List<ChannelSettings>,
+        new: List<ChannelSettings>
+    ) {
+        updateChannels(myNodeNum ?: return, old, new)
+    }
+
+    /**
+     * Convert the [channels] array to and from [ChannelSet]
+     */
+    private var _channelSet: AppOnlyProtos.ChannelSet
+        get() = channels.value.protobuf
+        set(value) {
+            updateChannels(channelSet.settingsList, value.settingsList)
 
             val newConfig = config { lora = value.loraConfig }
             if (config.lora != newConfig.lora) setConfig(newConfig)
@@ -454,12 +504,15 @@ class UIViewModel @Inject constructor(
 
     /// Set the radio config (also updates our saved copy in preferences)
     fun setChannels(channelSet: ChannelSet) {
-        debug("Setting new channels!")
         this._channelSet = channelSet.protobuf
     }
 
-    fun setRemoteChannel(destNum: Int, channel: ChannelProtos.Channel) {
-        meshService?.setRemoteChannel(destNum, channel.toByteArray())
+    private fun setRemoteChannel(destNum: Int, channel: ChannelProtos.Channel) {
+        try {
+            meshService?.setRemoteChannel(destNum, channel.toByteArray())
+        } catch (ex: RemoteException) {
+            errormsg("Can't set channel on radio ${ex.message}")
+        }
     }
 
     /// our name in hte radio
@@ -507,38 +560,6 @@ class UIViewModel @Inject constructor(
 
     val adminChannelIndex: Int
         get() = channelSet.settingsList.map { it.name.lowercase() }.indexOf("admin")
-
-    fun requestShutdown(idNum: Int) {
-        try {
-            meshService?.requestShutdown(idNum)
-        } catch (ex: RemoteException) {
-            errormsg("RemoteException: ${ex.message}")
-        }
-    }
-
-    fun requestReboot(idNum: Int) {
-        try {
-            meshService?.requestReboot(idNum)
-        } catch (ex: RemoteException) {
-            errormsg("RemoteException: ${ex.message}")
-        }
-    }
-
-    fun requestFactoryReset(idNum: Int) {
-        try {
-            meshService?.requestFactoryReset(idNum)
-        } catch (ex: RemoteException) {
-            errormsg("RemoteException: ${ex.message}")
-        }
-    }
-
-    fun requestNodedbReset(idNum: Int) {
-        try {
-            meshService?.requestNodedbReset(idNum)
-        } catch (ex: RemoteException) {
-            errormsg("RemoteException: ${ex.message}")
-        }
-    }
 
     /**
      * Write the persisted packet data out to a CSV file in the specified location.
@@ -651,6 +672,82 @@ class UIViewModel @Inject constructor(
         }
     }
 
+    private val _deviceProfile = MutableStateFlow<DeviceProfile?>(null)
+    val deviceProfile: StateFlow<DeviceProfile?> = _deviceProfile
+
+    fun setDeviceProfile(deviceProfile: DeviceProfile?) {
+        _deviceProfile.value = deviceProfile
+    }
+
+    fun importProfile(file_uri: Uri) = viewModelScope.launch(Dispatchers.Main) {
+        withContext(Dispatchers.IO) {
+            var inputStream: InputStream? = null
+            try {
+                inputStream = app.contentResolver.openInputStream(file_uri)
+                val bytes = inputStream?.readBytes()
+                val protobuf = DeviceProfile.parseFrom(bytes)
+                _deviceProfile.value = protobuf
+            } catch (ex: Exception) {
+                errormsg("Failed to import radio configs: ${ex.message}")
+            } finally {
+                inputStream?.close()
+            }
+        }
+    }
+
+    fun exportProfile(file_uri: Uri) = viewModelScope.launch {
+        val profile = deviceProfile.value ?: return@launch
+        writeToUri(file_uri, profile)
+        _deviceProfile.value = null
+    }
+
+    private suspend fun writeToUri(uri: Uri, message: MessageLite) = withContext(Dispatchers.IO) {
+        try {
+            app.contentResolver.openFileDescriptor(uri, "wt")?.use { parcelFileDescriptor ->
+                FileOutputStream(parcelFileDescriptor.fileDescriptor).use { outputStream ->
+                    message.writeTo(outputStream)
+                }
+            }
+        } catch (ex: FileNotFoundException) {
+            errormsg("Can't write file error: ${ex.message}")
+        }
+    }
+
+    fun installProfile(protobuf: DeviceProfile) = with(protobuf) {
+        _deviceProfile.value = null
+        // meshService?.beginEditSettings()
+        if (hasLongName() || hasShortName()) ourNodeInfo.value?.user?.let {
+            val user = it.copy(
+                longName = if (hasLongName()) longName else it.longName,
+                shortName = if (hasShortName()) shortName else it.shortName
+            )
+            setOwner(user)
+        }
+        if (hasChannelUrl()) {
+            setChannels(ChannelSet(Uri.parse(channelUrl)))
+        }
+        if (hasConfig()) {
+            setConfig(config { device = config.device })
+            setConfig(config { position = config.position })
+            setConfig(config { power = config.power })
+            setConfig(config { network = config.network })
+            setConfig(config { display = config.display })
+            setConfig(config { lora = config.lora })
+            setConfig(config { bluetooth = config.bluetooth })
+        }
+        if (hasModuleConfig()) moduleConfig.let {
+            setModuleConfig(moduleConfig { mqtt = it.mqtt })
+            setModuleConfig(moduleConfig { serial = it.serial })
+            setModuleConfig(moduleConfig { externalNotification = it.externalNotification })
+            setModuleConfig(moduleConfig { storeForward = it.storeForward })
+            setModuleConfig(moduleConfig { rangeTest = it.rangeTest })
+            setModuleConfig(moduleConfig { telemetry = it.telemetry })
+            setModuleConfig(moduleConfig { cannedMessage = it.cannedMessage })
+            setModuleConfig(moduleConfig { audio = it.audio })
+            setModuleConfig(moduleConfig { remoteHardware = it.remoteHardware })
+        }
+        // meshService?.commitEditSettings()
+    }
 
     fun parseUrl(url: String, map: MapView) {
         viewModelScope.launch(Dispatchers.IO) {

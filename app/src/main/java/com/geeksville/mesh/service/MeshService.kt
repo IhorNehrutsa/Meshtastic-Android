@@ -22,9 +22,7 @@ import com.geeksville.mesh.database.PacketRepository
 import com.geeksville.mesh.database.entity.MeshLog
 import com.geeksville.mesh.database.entity.Packet
 import com.geeksville.mesh.model.DeviceVersion
-import com.geeksville.mesh.repository.datastore.ChannelSetRepository
-import com.geeksville.mesh.repository.datastore.LocalConfigRepository
-import com.geeksville.mesh.repository.datastore.ModuleConfigRepository
+import com.geeksville.mesh.repository.datastore.RadioConfigRepository
 import com.geeksville.mesh.repository.location.LocationRepository
 import com.geeksville.mesh.repository.radio.BluetoothInterface
 import com.geeksville.mesh.repository.radio.RadioInterfaceService
@@ -76,13 +74,7 @@ class MeshService : Service(), Logging {
     lateinit var locationRepository: LocationRepository
 
     @Inject
-    lateinit var localConfigRepository: LocalConfigRepository
-
-    @Inject
-    lateinit var moduleConfigRepository: ModuleConfigRepository
-
-    @Inject
-    lateinit var channelSetRepository: ChannelSetRepository
+    lateinit var radioConfigRepository: RadioConfigRepository
 
     companion object : Logging {
 
@@ -251,9 +243,9 @@ class MeshService : Service(), Logging {
             .launchIn(serviceScope)
         radioInterfaceService.receivedData.onEach(::onReceiveFromRadio)
             .launchIn(serviceScope)
-        localConfigRepository.localConfigFlow.onEach { localConfig = it }
+        radioConfigRepository.localConfigFlow.onEach { localConfig = it }
             .launchIn(serviceScope)
-        channelSetRepository.channelSetFlow.onEach { channelSet = it }
+        radioConfigRepository.channelSetFlow.onEach { channelSet = it }
             .launchIn(serviceScope)
 
         // the rest of our init will happen once we are in radioConnection.onServiceConnected
@@ -465,7 +457,9 @@ class MeshService : Service(), Logging {
     private val myNodeID get() = toNodeID(myNodeNum)
 
     /// Admin channel index
-    private var adminChannelIndex: Int = 0
+    private val adminChannelIndex: Int
+        get() = channelSet.settingsList.indexOfFirst { it.name.lowercase() == "admin" }
+            .coerceAtLeast(0)
 
     /// Generate a new mesh packet builder with our node as the sender, and the specified node num
     private fun newMeshPacketTo(idNum: Int) = MeshPacket.newBuilder().apply {
@@ -627,6 +621,7 @@ class MeshService : Service(), Logging {
 
                     // Handle new style position info
                     Portnums.PortNum.POSITION_APP_VALUE -> {
+                        if (data.wantResponse) return // ignore data from position requests
                         var u = MeshProtos.Position.parseFrom(data.payload)
                         // position updates from mesh usually don't include times.  So promote rx time
                         if (u.time == 0 && packet.rxTime != 0)
@@ -746,10 +741,11 @@ class MeshService : Service(), Logging {
         p: MeshProtos.Position,
         defaultTime: Long = System.currentTimeMillis()
     ) {
-        // Nodes periodically send out position updates, but those updates might not contain valid data so
+        // Nodes periodically send out position updates, but those updates might not contain a lat & lon (because no GPS lock)
+        // We like to look at the local node to see if it has been sending out valid lat/lon, so for the LOCAL node (only)
         // we don't record these nop position updates
-        if (!Position(p).isValid() && currentSecond() - p.time > 2592000) // 30 days in seconds
-            debug("Ignoring nop position update for node $fromNum")
+        if (myNodeNum == fromNum && p.latitudeI == 0 && p.longitudeI == 0)
+            debug("Ignoring nop position update for the local node")
         else
             updateNodeInfo(fromNum) {
                 debug("update position: ${it.user?.longName?.toPIIString()} with ${p.toPIIString()}")
@@ -954,28 +950,25 @@ class MeshService : Service(), Logging {
 
     private fun setLocalConfig(config: ConfigProtos.Config) {
         serviceScope.handledLaunch {
-            localConfigRepository.setLocalConfig(config)
+            radioConfigRepository.setLocalConfig(config)
         }
     }
 
     private fun setLocalModuleConfig(config: ModuleConfigProtos.ModuleConfig) {
         serviceScope.handledLaunch {
-            moduleConfigRepository.setLocalModuleConfig(config)
+            radioConfigRepository.setLocalModuleConfig(config)
         }
     }
 
     private fun clearLocalConfig() {
         serviceScope.handledLaunch {
-            localConfigRepository.clearLocalConfig()
-            moduleConfigRepository.clearLocalModuleConfig()
+            radioConfigRepository.clearLocalConfig()
+            radioConfigRepository.clearLocalModuleConfig()
         }
     }
 
-    private fun addChannelSettings(ch: ChannelProtos.Channel) {
-        if (ch.index == 0 || ch.settings.name.lowercase() == "admin") adminChannelIndex = ch.index
-        serviceScope.handledLaunch {
-            channelSetRepository.addSettings(ch)
-        }
+    private fun updateChannelSettings(ch: ChannelProtos.Channel) = serviceScope.handledLaunch {
+        radioConfigRepository.updateChannelSettings(ch)
     }
 
     private fun currentSecond() = (System.currentTimeMillis() / 1000).toInt()
@@ -1223,7 +1216,7 @@ class MeshService : Service(), Logging {
             ch.toString()
         )
         insertMeshLog(packetToSave)
-        if (ch.role != ChannelProtos.Channel.Role.DISABLED) addChannelSettings(ch)
+        if (ch.role != ChannelProtos.Channel.Role.DISABLED) updateChannelSettings(ch)
     }
 
     /**
@@ -1355,9 +1348,9 @@ class MeshService : Service(), Logging {
 
         // We'll need to get a new set of channels and settings now
         serviceScope.handledLaunch {
-            channelSetRepository.clearChannelSet()
-            localConfigRepository.clearLocalConfig()
-            moduleConfigRepository.clearLocalModuleConfig()
+            radioConfigRepository.clearChannelSet()
+            radioConfigRepository.clearLocalConfig()
+            radioConfigRepository.clearLocalModuleConfig()
         }
     }
 
@@ -1421,13 +1414,6 @@ class MeshService : Service(), Logging {
         AdminProtos.AdminMessage.ConfigType.values().filter {
             it != AdminProtos.AdminMessage.ConfigType.UNRECOGNIZED
         }.forEach(::requestConfig)
-    }
-
-    private fun setChannel(ch: ChannelProtos.Channel) {
-        if (ch.index == 0 || ch.settings.name.lowercase() == "admin") adminChannelIndex = ch.index
-        sendToRadio(newMeshPacketTo(myNodeNum).buildAdminPacket(wantResponse = true) {
-            setChannel = ch
-        })
     }
 
     /**
@@ -1741,17 +1727,12 @@ class MeshService : Service(), Logging {
         }
 
         override fun setChannel(payload: ByteArray?) = toRemoteExceptions {
-            with(ChannelProtos.Channel.parseFrom(payload)) {
-                if (index == 0 || settings.name.lowercase() == "admin") adminChannelIndex = index
-            }
             setRemoteChannel(myNodeNum, payload)
         }
 
         override fun setRemoteChannel(destNum: Int, payload: ByteArray?) = toRemoteExceptions {
             val channel = ChannelProtos.Channel.parseFrom(payload)
-            sendToRadio(newMeshPacketTo(destNum).buildAdminPacket(wantResponse = true) {
-                setChannel = channel
-            })
+            sendToRadio(newMeshPacketTo(destNum).buildAdminPacket { setChannel = channel })
         }
 
         override fun getRemoteChannel(id: Int, destNum: Int, index: Int) = toRemoteExceptions {
@@ -1800,11 +1781,11 @@ class MeshService : Service(), Logging {
         override fun requestPosition(destNum: Int, position: Position) = toRemoteExceptions {
             if (position == Position(0.0, 0.0, 0)) {
                 // request position
-                sendPosition(time = 1, destNum = destNum, wantResponse = true)
+                sendPosition(destNum = destNum, wantResponse = true)
             } else {
-                // send fixed position
+                // send fixed position (local only/no remote method, so we force destNum to null)
                 val (lat, lon, alt) = position
-                sendPosition(time = 0, destNum = null, lat = lat, lon = lon, alt = alt)
+                sendPosition(destNum = null, lat = lat, lon = lon, alt = alt)
             }
         }
 
@@ -1816,26 +1797,26 @@ class MeshService : Service(), Logging {
             })
         }
 
-        override fun requestShutdown(idNum: Int) = toRemoteExceptions {
-            sendToRadio(newMeshPacketTo(idNum).buildAdminPacket {
+        override fun requestShutdown(requestId: Int, destNum: Int) = toRemoteExceptions {
+            sendToRadio(newMeshPacketTo(destNum).buildAdminPacket(id = requestId) {
                 shutdownSeconds = 5
             })
         }
 
-        override fun requestReboot(idNum: Int) = toRemoteExceptions {
-            sendToRadio(newMeshPacketTo(idNum).buildAdminPacket {
+        override fun requestReboot(requestId: Int, destNum: Int) = toRemoteExceptions {
+            sendToRadio(newMeshPacketTo(destNum).buildAdminPacket(id = requestId) {
                 rebootSeconds = 5
             })
         }
 
-        override fun requestFactoryReset(idNum: Int) = toRemoteExceptions {
-            sendToRadio(newMeshPacketTo(idNum).buildAdminPacket {
+        override fun requestFactoryReset(requestId: Int, destNum: Int) = toRemoteExceptions {
+            sendToRadio(newMeshPacketTo(destNum).buildAdminPacket(id = requestId) {
                 factoryReset = 1
             })
         }
 
-        override fun requestNodedbReset(idNum: Int) = toRemoteExceptions {
-            sendToRadio(newMeshPacketTo(idNum).buildAdminPacket {
+        override fun requestNodedbReset(requestId: Int, destNum: Int) = toRemoteExceptions {
+            sendToRadio(newMeshPacketTo(destNum).buildAdminPacket(id = requestId) {
                 nodedbReset = 1
             })
         }

@@ -1,6 +1,11 @@
 package com.geeksville.mesh.ui.components.config
 
 import androidx.annotation.StringRes
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
@@ -84,34 +89,21 @@ fun ChannelCard(
 @Composable
 fun ChannelSettingsItemList(
     settingsList: List<ChannelSettings>,
+    modemPresetName: String = "Default",
     maxChannels: Int = 8,
     enabled: Boolean,
     focusManager: FocusManager,
-    onSaveClicked: (List<ChannelSettings>) -> Unit,
-) {
-    ChannelSettingsItemList(
-        settingsList = settingsList,
-        maxChannels = maxChannels,
-        enabled = enabled,
-        focusManager = focusManager,
-        onPositiveClicked = onSaveClicked,
-        onNegativeClicked = { }
-    )
-}
-
-@Composable
-fun ChannelSettingsItemList(
-    settingsList: List<ChannelSettings>,
-    maxChannels: Int = 8,
-    enabled: Boolean,
-    focusManager: FocusManager,
-    onNegativeClicked: () -> Unit,
+    onNegativeClicked: () -> Unit = { },
     @StringRes positiveText: Int = R.string.send,
     onPositiveClicked: (List<ChannelSettings>) -> Unit,
-    ) {
+) {
     val settingsListInput = remember {
         mutableStateListOf<ChannelSettings>().apply { addAll(settingsList) }
     }
+
+    val isEditing: Boolean = settingsList.size != settingsListInput.size
+            || settingsList.zip(settingsListInput).any { (item1, item2) -> item1 != item2 }
+
     var showEditChannelDialog: Int? by remember { mutableStateOf(null) }
 
     if (showEditChannelDialog != null) {
@@ -120,6 +112,7 @@ fun ChannelSettingsItemList(
             channelSettings = with(settingsListInput) {
                 if (size > index) get(index) else channelSettings { }
             },
+            modemPresetName = modemPresetName,
             onAddClick = {
                 if (settingsListInput.size > index) settingsListInput[index] = it
                 else settingsListInput.add(it)
@@ -130,20 +123,10 @@ fun ChannelSettingsItemList(
     }
 
     Box(
-        modifier = Modifier.fillMaxSize()
+        modifier = Modifier
+            .fillMaxSize()
+            .clickable(onClick = { }, enabled = false)
     ) {
-        if (maxChannels > settingsListInput.size) FloatingActionButton(
-            onClick = {
-                settingsListInput.add(channelSettings {
-                    psk = Channel.default.settings.psk
-                })
-                showEditChannelDialog = settingsListInput.size - 1
-            },
-            modifier = Modifier
-                .padding(16.dp)
-                .align(Alignment.BottomEnd),
-        ) { Icon(Icons.TwoTone.Add, stringResource(R.string.add)) }
-
         LazyColumn(
             modifier = Modifier.padding(horizontal = 16.dp)
         ) {
@@ -152,7 +135,7 @@ fun ChannelSettingsItemList(
             itemsIndexed(settingsListInput) { index, channel ->
                 ChannelCard(
                     index = index,
-                    title = channel.name,
+                    title = channel.name.ifEmpty { modemPresetName },
                     enabled = enabled,
                     onEditClick = { showEditChannelDialog = index },
                     onDeleteClick = { settingsListInput.removeAt(index) }
@@ -162,9 +145,7 @@ fun ChannelSettingsItemList(
             item {
                 PreferenceFooter(
                     // FIXME workaround until we use navigation in ChannelFragment
-                    enabled = positiveText != R.string.send
-                            || !settingsListInput.containsAll(settingsList)
-                            || !settingsList.containsAll(settingsListInput),
+                    enabled = isEditing || positiveText != R.string.send,
                     negativeText = R.string.cancel,
                     onNegativeClicked = {
                         focusManager.clearFocus()
@@ -176,6 +157,29 @@ fun ChannelSettingsItemList(
                     onPositiveClicked = { onPositiveClicked(settingsListInput) }
                 )
             }
+        }
+
+        AnimatedVisibility(
+            visible = maxChannels > settingsListInput.size,
+            modifier = Modifier.align(Alignment.BottomEnd),
+            enter = slideInHorizontally(
+                initialOffsetX = { it },
+                animationSpec = tween(durationMillis = 600, easing = FastOutSlowInEasing)
+            ),
+            exit = slideOutHorizontally(
+                targetOffsetX = { it },
+                animationSpec = tween(durationMillis = 600, easing = FastOutSlowInEasing)
+            )
+        ) {
+            FloatingActionButton(
+                onClick = {
+                    settingsListInput.add(channelSettings {
+                        psk = Channel.default.settings.psk
+                    })
+                    showEditChannelDialog = settingsListInput.lastIndex
+                },
+                modifier = Modifier.padding(16.dp)
+            ) { Icon(Icons.TwoTone.Add, stringResource(R.string.add)) }
         }
     }
 }
@@ -195,6 +199,6 @@ fun ChannelSettingsPreview() {
         ),
         enabled = true,
         focusManager = LocalFocusManager.current,
-        onSaveClicked = { },
+        onPositiveClicked = { },
     )
 }

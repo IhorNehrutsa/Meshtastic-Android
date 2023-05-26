@@ -118,14 +118,15 @@ fun ChannelScreen(viewModel: UIViewModel = viewModel()) {
 
     val connectionState by viewModel.connectionState.observeAsState()
     val connected = connectionState == MeshService.ConnectionState.CONNECTED
+    val enabled = connected && !viewModel.isManaged
 
     val channels by viewModel.channels.collectAsStateWithLifecycle()
     var channelSet by remember(channels) { mutableStateOf(channels.protobuf) }
+    val isEditing = channelSet != channels.protobuf
 
     val primaryChannel = ChannelSet(channelSet).primaryChannel
     val channelUrl = ChannelSet(channelSet).getChannelUrl()
-
-    val isEditing by remember(channelSet) { mutableStateOf(channelSet != channels.protobuf) }
+    val modemPresetName = Channel(Channel.default.settings, channelSet.loraConfig).name
 
     val barcodeLauncher = rememberLauncherForActivityResult(ScanContract()) { result ->
         if (result.contents != null) {
@@ -244,6 +245,7 @@ fun ChannelScreen(viewModel: UIViewModel = viewModel()) {
             channelSettings = with(channelSet) {
                 if (settingsCount > index) getSettings(index) else channelSettings { }
             },
+            modemPresetName = modemPresetName,
             onAddClick = {
                 with(channelSet) {
                     if (settingsCount > index) channelSet = copy { settings[index] = it }
@@ -258,7 +260,8 @@ fun ChannelScreen(viewModel: UIViewModel = viewModel()) {
     var showChannelEditor by remember { mutableStateOf(false) }
     if (showChannelEditor) ChannelSettingsItemList(
         settingsList = channelSet.settingsList,
-        enabled = connected,
+        modemPresetName = modemPresetName,
+        enabled = enabled,
         focusManager = focusManager,
         onNegativeClicked = {
             focusManager.clearFocus()
@@ -282,7 +285,7 @@ fun ChannelScreen(viewModel: UIViewModel = viewModel()) {
                 title = stringResource(R.string.channel_name),
                 subtitle = primaryChannel?.humanName.orEmpty(),
                 onClick = { showChannelEditor = true },
-                enabled = connected,
+                enabled = enabled,
                 trailingIcon = Icons.TwoTone.Edit
             )
         }
@@ -293,7 +296,7 @@ fun ChannelScreen(viewModel: UIViewModel = viewModel()) {
                     ?: painterResource(id = R.drawable.qrcode),
                 contentDescription = stringResource(R.string.qr_code),
                 contentScale = ContentScale.FillWidth,
-                alpha = if (connected) 1f else 0.25f,
+                alpha = if (enabled) 1f else 0.25f,
                 // colorFilter = ColorFilter.colorMatrix(ColorMatrix().apply { setToSaturation(0f) }),
                 modifier = Modifier
                     .fillMaxWidth()
@@ -316,7 +319,7 @@ fun ChannelScreen(viewModel: UIViewModel = viewModel()) {
                     }
                 },
                 modifier = Modifier.fillMaxWidth(),
-                enabled = connected,
+                enabled = enabled,
                 label = { Text("URL") },
                 isError = isError,
                 trailingIcon = {
@@ -362,7 +365,7 @@ fun ChannelScreen(viewModel: UIViewModel = viewModel()) {
 
         item {
             DropDownPreference(title = stringResource(id = R.string.channel_options),
-                enabled = connected,
+                enabled = enabled,
                 items = ChannelOption.values()
                     .map { it.modemPreset to stringResource(it.configRes) },
                 selectedItem = channelSet.loraConfig.modemPreset,
@@ -374,7 +377,7 @@ fun ChannelScreen(viewModel: UIViewModel = viewModel()) {
 
         if (isEditing) item {
             PreferenceFooter(
-                enabled = connected,
+                enabled = enabled,
                 onCancelClicked = {
                     focusManager.clearFocus()
                     channelSet = channels.protobuf
@@ -387,7 +390,7 @@ fun ChannelScreen(viewModel: UIViewModel = viewModel()) {
         } else {
             item {
                 PreferenceFooter(
-                    enabled = connected,
+                    enabled = enabled,
                     negativeText = R.string.reset,
                     onNegativeClicked = {
                         focusManager.clearFocus()
