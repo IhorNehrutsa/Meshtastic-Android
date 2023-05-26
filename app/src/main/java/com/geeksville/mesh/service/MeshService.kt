@@ -14,6 +14,7 @@ import com.geeksville.mesh.concurrent.handledLaunch
 import com.geeksville.mesh.*
 import com.geeksville.mesh.LocalOnlyProtos.LocalConfig
 import com.geeksville.mesh.MeshProtos.MeshPacket
+import com.geeksville.mesh.MeshProtos.PtdButtons
 import com.geeksville.mesh.MeshProtos.ToRadio
 import com.geeksville.mesh.android.hasBackgroundPermission
 import com.geeksville.mesh.database.MeshLogRepository
@@ -666,6 +667,13 @@ class MeshService : Service(), Logging {
                         shouldBroadcast = false
                     }
 
+                    Portnums.PortNum.PTD_APP_VALUE -> {
+                        val u = PtdButtons.parseFrom(data.payload)
+                        info("======================Received from radio service Portnums.PortNum.PTD_APP_VALUE: ${u.toOneLineString()}")
+                        //handleReceivedAdmin(packet.from, u)
+                        shouldBroadcast = false
+                    }
+
                     else ->
                         debug("No custom processing needed for ${data.portnumValue}")
                 }
@@ -1138,7 +1146,7 @@ class MeshService : Service(), Logging {
     private fun onReceiveFromRadio(bytes: ByteArray) {
         try {
             val proto = MeshProtos.FromRadio.parseFrom(bytes)
-            // info("Received from radio service: ${proto.toOneLineString()}")
+            info("Received from radio service: ${proto.toOneLineString()} number=${proto.payloadVariantCase.number}")
             when (proto.payloadVariantCase.number) {
                 MeshProtos.FromRadio.PACKET_FIELD_NUMBER -> handleReceivedMeshPacket(proto.packet)
                 MeshProtos.FromRadio.CONFIG_COMPLETE_ID_FIELD_NUMBER -> handleConfigComplete(proto.configCompleteId)
@@ -1148,7 +1156,8 @@ class MeshService : Service(), Logging {
                 MeshProtos.FromRadio.CONFIG_FIELD_NUMBER -> handleDeviceConfig(proto.config)
                 MeshProtos.FromRadio.MODULECONFIG_FIELD_NUMBER -> handleModuleConfig(proto.moduleConfig)
                 MeshProtos.FromRadio.QUEUESTATUS_FIELD_NUMBER -> handleQueueStatus(proto.queueStatus)
-                else -> errormsg("Unexpected FromRadio variant")
+                MeshProtos.FromRadio.PTDBUTTONS_FIELD_NUMBER -> handlePtdButtons(proto.ptdButtons)
+                else -> errormsg("Unexpected FromRadio variant =${proto.payloadVariantCase.number}")
             }
         } catch (ex: InvalidProtocolBufferException) {
             errormsg("Invalid Protobuf from radio, len=${bytes.size}", ex)
@@ -1196,6 +1205,13 @@ class MeshService : Service(), Logging {
         if (success && isFull) return // Queue is full, wait for free != 0
         if (requestId != 0) queueResponse.remove(requestId)?.complete(success)
         else queueResponse.entries.lastOrNull { !it.value.isDone }?.value?.complete(success)
+    }
+
+    private fun handlePtdButtons(ptdButtons: MeshProtos.PtdButtons) {
+        debug("handlePtdButtons: ptdButtons ${ptdButtons.toOneLineString()}")
+        debug("handlePtdButtons: ptdButtons.buttonValue=${ptdButtons.buttonValue}")
+        debug("handlePtdButtons: ptdButtons.event=${ptdButtons.event}")
+        debug("handlePtdButtons: ptdButtons.buttonsStates=${ptdButtons.buttonsStates}")
     }
 
     private fun handleChannel(ch: ChannelProtos.Channel) {
