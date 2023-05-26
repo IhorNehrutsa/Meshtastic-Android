@@ -1201,10 +1201,10 @@ class MeshService : Service(), Logging {
     }
 
     private fun handlePtdButtons(ptdButtons: MeshProtos.PtdButtons) {
-        debug("handlePtdButtons: ptdButtons ${ptdButtons.toOneLineString()}")
-        debug("handlePtdButtons: ptdButtons.buttonValue=${ptdButtons.buttonValue}")
-        debug("handlePtdButtons: ptdButtons.event=${ptdButtons.event}")
-        debug("handlePtdButtons: ptdButtons.buttonsStates=${ptdButtons.buttonsStates}")
+        info("handlePtdButtons: ptdButtons ${ptdButtons.toOneLineString()}")
+        info("handlePtdButtons: ptdButtons.buttonValue=${ptdButtons.buttonValue}")
+        info("handlePtdButtons: ptdButtons.event=${ptdButtons.event}")
+        info("handlePtdButtons: ptdButtons.buttonsStates=${ptdButtons.buttonsStates}")
     }
 
     private fun handleChannel(ch: ChannelProtos.Channel) {
