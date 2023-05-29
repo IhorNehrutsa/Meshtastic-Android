@@ -32,13 +32,11 @@ import androidx.viewpager2.adapter.FragmentStateAdapter
 import com.geeksville.mesh.android.*
 import com.geeksville.mesh.concurrent.handledLaunch
 import com.geeksville.mesh.databinding.ActivityMainBinding
-import com.geeksville.mesh.model.BTScanModel
 import com.geeksville.mesh.model.BluetoothViewModel
 import com.geeksville.mesh.model.ChannelSet
 import com.geeksville.mesh.model.DeviceVersion
 import com.geeksville.mesh.model.UIViewModel
 import com.geeksville.mesh.repository.radio.BluetoothInterface
-import com.geeksville.mesh.repository.radio.RadioInterfaceService
 import com.geeksville.mesh.repository.radio.SerialInterface
 import com.geeksville.mesh.service.*
 import com.geeksville.mesh.ui.*
@@ -55,7 +53,6 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
 import java.text.DateFormat
 import java.util.Date
-import javax.inject.Inject
 
 /*
 UI design
@@ -115,11 +112,7 @@ class MainActivity : AppCompatActivity(), Logging {
     private val mainScope = CoroutineScope(Dispatchers.Main + Job())
 
     private val bluetoothViewModel: BluetoothViewModel by viewModels()
-    private val scanModel: BTScanModel by viewModels()
-    val model: UIViewModel by viewModels()
-
-    @Inject
-    internal lateinit var radioInterfaceService: RadioInterfaceService
+    private val model: UIViewModel by viewModels()
 
     private val requestPermissionsLauncher =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { permissions ->
@@ -634,7 +627,6 @@ class MainActivity : AppCompatActivity(), Logging {
         unregisterMeshReceiver() // No point in receiving updates while the GUI is gone, we'll get them when the user launches the activity
         unbindMeshService()
 
-        scanModel.changeDeviceAddress.removeObservers(this)
         model.connectionState.removeObservers(this)
         bluetoothViewModel.enabled.removeObservers(this)
         model.requestChannelUrl.removeObservers(this)
@@ -645,26 +637,12 @@ class MainActivity : AppCompatActivity(), Logging {
     override fun onStart() {
         super.onStart()
 
-        scanModel.changeDeviceAddress.observe(this) { newAddr ->
-            newAddr?.let {
-                try {
-                    model.meshService?.let { service ->
-                        MeshService.changeDeviceAddress(this, service, newAddr)
-                    }
-                    scanModel.changeSelectedAddress(newAddr) // if it throws the change will be discarded
-                } catch (ex: RemoteException) {
-                    errormsg("changeDeviceSelection failed, probably it is shutting down $ex.message")
-                    // ignore the failure and the GUI won't be updating anyways
-                }
-            }
-        }
-
         model.connectionState.observe(this) { connected ->
             updateConnectionStatusImage(connected)
         }
 
         bluetoothViewModel.enabled.observe(this) { enabled ->
-            if (!enabled && !requestedEnable && scanModel.selectedBluetooth) {
+            if (!enabled && !requestedEnable && model.selectedBluetooth) {
                 requestedEnable = true
                 if (hasBluetoothPermission()) {
                     val enableBtIntent = Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE)
@@ -701,7 +679,7 @@ class MainActivity : AppCompatActivity(), Logging {
             errormsg("Bind of MeshService failed")
         }
 
-        val bonded = radioInterfaceService.getBondedDeviceAddress() != null
+        val bonded = model.bondedAddress != null
         if (!bonded && usbDevice == null) // we will handle USB later
             showSettingsPage()
     }

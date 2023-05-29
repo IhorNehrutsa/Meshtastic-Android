@@ -29,6 +29,7 @@ import com.geeksville.mesh.LocalOnlyProtos.LocalModuleConfig
 import com.geeksville.mesh.MeshProtos.User
 import com.geeksville.mesh.database.PacketRepository
 import com.geeksville.mesh.repository.datastore.RadioConfigRepository
+import com.geeksville.mesh.repository.radio.RadioInterfaceService
 import com.geeksville.mesh.service.MeshService
 import com.geeksville.mesh.util.GPSFormat
 import com.geeksville.mesh.util.positionToMeter
@@ -86,6 +87,7 @@ fun getInitials(nameIn: String): String {
 class UIViewModel @Inject constructor(
     private val app: Application,
     private val radioConfigRepository: RadioConfigRepository,
+    private val radioInterfaceService: RadioInterfaceService,
     private val meshLogRepository: MeshLogRepository,
     private val packetRepository: PacketRepository,
     private val quickChatActionRepository: QuickChatActionRepository,
@@ -95,6 +97,9 @@ class UIViewModel @Inject constructor(
     var actionBarMenu: Menu? = null
     var meshService: IMeshService? = null
     val nodeDB = NodeDB(this)
+
+    val bondedAddress get() = radioInterfaceService.getBondedDeviceAddress()
+    val selectedBluetooth: Boolean get() = bondedAddress?.getOrNull(0) == 'x'
 
     private val _meshLog = MutableStateFlow<List<MeshLog>>(emptyList())
     val meshLog: StateFlow<List<MeshLog>> = _meshLog
@@ -421,8 +426,6 @@ class UIViewModel @Inject constructor(
             try {
                 // Pull down our real node ID - This must be done AFTER reading the nodedb because we need the DB to find our nodeinof object
                 nodeDB.setMyId(service.myId)
-                val ownerName = nodes[service.myId]?.user?.longName
-                _ownerName.value = ownerName
             } catch (ex: Exception) {
                 warn("Ignoring failure to get myId, service is probably just uninited... ${ex.message}")
             }
@@ -515,12 +518,6 @@ class UIViewModel @Inject constructor(
         }
     }
 
-    /// our name in hte radio
-    /// Note, we generate owner initials automatically for now
-    /// our activity will read this from prefs or set it to the empty string
-    private val _ownerName = MutableLiveData<String?>()
-    val ownerName: LiveData<String?> get() = _ownerName
-
     val provideLocation = object : MutableLiveData<Boolean>(preferences.getBoolean("provide-location", false)) {
         override fun setValue(value: Boolean) {
             super.setValue(value)
@@ -531,22 +528,8 @@ class UIViewModel @Inject constructor(
         }
     }
 
-    fun setOwner(user: MeshUser) = with(user) {
-
-        longName.trim().let { ownerName ->
-            // note: we allow an empty user string to be written to prefs
-            _ownerName.value = ownerName
-            preferences.edit { putString("owner", ownerName) }
-        }
-
-        // Note: we are careful to not set a new unique ID
-        if (_ownerName.value!!.isNotEmpty())
-            try {
-                // Note: we use ?. here because we might be running in the emulator
-                meshService?.setOwner(user)
-            } catch (ex: RemoteException) {
-                errormsg("Can't set username on device, is device offline? ${ex.message}")
-            }
+    fun setOwner(user: User) {
+        setRemoteOwner(myNodeNum ?: return, user)
     }
 
     fun setRemoteOwner(destNum: Int, user: User) {
@@ -721,7 +704,7 @@ class UIViewModel @Inject constructor(
                 longName = if (hasLongName()) longName else it.longName,
                 shortName = if (hasShortName()) shortName else it.shortName
             )
-            setOwner(user)
+            setOwner(user.toProto())
         }
         if (hasChannelUrl()) {
             setChannels(ChannelSet(Uri.parse(channelUrl)))
