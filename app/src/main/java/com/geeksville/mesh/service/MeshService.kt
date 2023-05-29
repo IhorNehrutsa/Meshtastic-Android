@@ -1202,7 +1202,7 @@ class MeshService : Service(), Logging {
 
     private fun handlePtdButtons(ptdButtons: MeshProtos.PtdButtons) {
         info("handlePtdButtons: ptdButtons ${ptdButtons.toOneLineString()}")
-        info("handlePtdButtons: ptdButtons.buttonValue=${ptdButtons.buttonValue}")
+        info("handlePtdButtons: ptdButtons.button=${ptdButtons.button}")
         info("handlePtdButtons: ptdButtons.event=${ptdButtons.event}")
         info("handlePtdButtons: ptdButtons.buttonsStates=${ptdButtons.buttonsStates}")
     }
